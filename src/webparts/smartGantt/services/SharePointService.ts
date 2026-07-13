@@ -49,6 +49,8 @@ export class SharePointService {
       await this.sp.web.lists.getByTitle(PROJECTS_LIST)();
       // List exists — add IsArchived if missing (migration for deployments before v1.2)
       await this._ensureIsArchivedField();
+      // Ensure Category field exists (custom field for customization)
+      await this._ensureCategoryField();
     } catch (e) {
       if (!isNotFoundError(e)) throw e;
       await this.sp.web.lists.add(PROJECTS_LIST, 'Smart Gantt — project registry', 100, false);
@@ -64,6 +66,7 @@ export class SharePointService {
       await list.fields.addText('ProjectManager', { MaxLength: 255 });
       await list.fields.addText('ProjectManagerEmail', { MaxLength: 255 });
       await list.fields.add('IsArchived', 8, {});
+      await list.fields.addText('Category', { MaxLength: 255 });
       await this._setupMetaListView();
     }
     this.projectsListEnsured = true;
@@ -83,6 +86,20 @@ export class SharePointService {
     }
   }
 
+  private async _ensureCategoryField(): Promise<void> {
+    const list = this.sp.web.lists.getByTitle(PROJECTS_LIST);
+    try {
+      await list.fields.getByInternalNameOrTitle('Category')();
+    } catch {
+      try {
+        await list.fields.addText('Category', { MaxLength: 255 });
+      } catch (e) {
+        // Read-only users can't add fields; field simply won't be available.
+        console.warn('[SmartGantt] Category field migration skipped:', e);
+      }
+    }
+  }
+
   async getProjects(): Promise<IProject[]> {
     await this.ensureProjectsList();
     const items = await this.sp.web.lists
@@ -90,7 +107,7 @@ export class SharePointService {
       .items.select(
         'Id', 'Title', 'ProjectListName', 'ProjectDescription', 'ProjectColor',
         'ProjectStartDate', 'ProjectDueDate', 'ProjectStatus', 'ProjectManager',
-        'ProjectManagerEmail', 'Created', 'IsArchived'
+        'ProjectManagerEmail', 'Created', 'IsArchived', 'Category'
       )
       .getAll();
 
@@ -108,6 +125,7 @@ export class SharePointService {
         projectManagerEmail: item.ProjectManagerEmail || '',
         created: item.Created,
         isArchived: item.IsArchived === true,
+        category: item.Category || '',
       }))
       .sort((a, b) => a.title.localeCompare(b.title));
   }
@@ -119,6 +137,7 @@ export class SharePointService {
     startDate: string;
     dueDate: string;
     status: ProjectStatus;
+    category?: string;
   }): Promise<IProject> {
     await this.ensureProjectsList();
 
@@ -137,6 +156,7 @@ export class SharePointService {
         ProjectStartDate: toSPDate(data.startDate),
         ProjectDueDate: toSPDate(data.dueDate),
         ProjectStatus: data.status,
+        Category: data.category || '',
       });
     } catch (e) {
       // Registry entry failed — recycle the orphan task list so a retry is clean.
@@ -156,6 +176,7 @@ export class SharePointService {
       projectManager: '',
       projectManagerEmail: '',
       created: new Date().toISOString(),
+      category: data.category || '',
     };
   }
 
@@ -168,6 +189,7 @@ export class SharePointService {
     if (data.dueDate !== undefined) updates.ProjectDueDate = toSPDate(data.dueDate);
     if (data.status !== undefined) updates.ProjectStatus = data.status;
     if (data.isArchived !== undefined) updates.IsArchived = data.isArchived;
+    if (data.category !== undefined) updates.Category = data.category;
     await this.sp.web.lists.getByTitle(PROJECTS_LIST).items.getById(id).update(updates);
   }
 
@@ -223,6 +245,11 @@ export class SharePointService {
     queue(list.fields.addText('Phase', { MaxLength: 100 }));
     queue(list.fields.addText('AssignedToName', { MaxLength: 255 }));
     queue(list.fields.addText('AssignedToEmail', { MaxLength: 255 }));
+    // Custom fields for task customization
+    queue(list.fields.addChoice('BusEffort', { Choices: ['0', '1', '2', '3'] }));
+    queue(list.fields.addChoice('BusImpact', { Choices: ['0', '1', '2', '3'] }));
+    queue(list.fields.addText('HRCompArea', { MaxLength: 255 }));
+    queue(list.fields.addChoice('HREffort', { Choices: ['0', '1', '2', '3'] }));
 
     await execute();
 
@@ -237,7 +264,8 @@ export class SharePointService {
       .items.select(
         'Id', 'Title', 'TaskDescription', 'StartDate', 'DueDate', 'Status', 'Priority',
         'AssignedToName', 'AssignedToEmail', 'PercentComplete', 'ParentTaskId', 'Dependencies',
-        'Notes', 'TaskColor', 'SortOrder', 'IsMilestone', 'Phase', 'Created', 'Modified'
+        'Notes', 'TaskColor', 'SortOrder', 'IsMilestone', 'Phase', 'Created', 'Modified',
+        'BusEffort', 'BusImpact', 'HRCompArea', 'HREffort'
       )
       .getAll();
 
@@ -264,6 +292,10 @@ export class SharePointService {
         phase: item.Phase || '',
         created: item.Created,
         modified: item.Modified,
+        busEffort: item.BusEffort || '',
+        busImpact: item.BusImpact || '',
+        hrCompArea: item.HRCompArea || '',
+        hrEffort: item.HREffort || '',
       }))
       .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
   }
@@ -374,6 +406,10 @@ export class SharePointService {
       SortOrder: task.sortOrder || 0,
       IsMilestone: task.isMilestone || false,
       Phase: task.phase || '',
+      BusEffort: task.busEffort || '',
+      BusImpact: task.busImpact || '',
+      HRCompArea: task.hrCompArea || '',
+      HREffort: task.hrEffort || '',
     });
 
     return {
@@ -396,6 +432,10 @@ export class SharePointService {
       phase: task.phase || '',
       created: new Date().toISOString(),
       modified: new Date().toISOString(),
+      busEffort: task.busEffort || '',
+      busImpact: task.busImpact || '',
+      hrCompArea: task.hrCompArea || '',
+      hrEffort: task.hrEffort || '',
     };
   }
 
@@ -417,6 +457,10 @@ export class SharePointService {
     if (updates.sortOrder !== undefined) data.SortOrder = updates.sortOrder;
     if (updates.isMilestone !== undefined) data.IsMilestone = updates.isMilestone;
     if (updates.phase !== undefined) data.Phase = updates.phase;
+    if (updates.busEffort !== undefined) data.BusEffort = updates.busEffort;
+    if (updates.busImpact !== undefined) data.BusImpact = updates.busImpact;
+    if (updates.hrCompArea !== undefined) data.HRCompArea = updates.hrCompArea;
+    if (updates.hrEffort !== undefined) data.HREffort = updates.hrEffort;
     await this.sp.web.lists.getByTitle(listName).items.getById(id).update(data);
   }
 

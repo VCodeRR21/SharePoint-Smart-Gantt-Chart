@@ -22,6 +22,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
   const [startDate, setStartDate] = React.useState('');
   const [dueDate, setDueDate] = React.useState('');
   const [status, setStatus] = React.useState<ProjectStatus>('Active');
+  const [category, setCategory] = React.useState('');
   const [saving, setSaving] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
 
@@ -35,6 +36,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         setStartDate(toDateOnly(project.startDate));
         setDueDate(toDateOnly(project.dueDate));
         setStatus(project.status);
+        setCategory(project.category || '');
       } else {
         setTitle('');
         setDescription('');
@@ -42,6 +44,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         setStartDate('');
         setDueDate('');
         setStatus('Active');
+        setCategory('');
       }
       setErrors({});
       setSaving(false);
@@ -67,6 +70,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         startDate,
         dueDate,
         status,
+        category,
       });
     } finally {
       setSaving(false);
@@ -164,6 +168,14 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
           selectedKey={status}
           options={statusOptions}
           onChange={(_, opt) => opt && setStatus(opt.key as ProjectStatus)}
+        />
+
+        {/* Category */}
+        <TextField
+          label="Category"
+          value={category}
+          onChange={(_, v) => setCategory(v || '')}
+          placeholder="e.g. Infrastructure, Feature, Maintenance"
         />
 
         {/* Date range */}

@@ -11,6 +11,7 @@ export interface IProject {
   projectManagerEmail: string;
   created: string;
   isArchived?: boolean;
+  category?: string;
 }
 
 export type ProjectStatus = 'Planning' | 'Active' | 'On Hold' | 'Completed' | 'Cancelled';
@@ -35,6 +36,10 @@ export interface ITask {
   phase: string;
   created: string;
   modified: string;
+  busEffort?: string;
+  busImpact?: string;
+  hrCompArea?: string;
+  hrEffort?: string;
 }
 
 export type TaskStatus = 'Not Started' | 'In Progress' | 'Completed' | 'On Hold' | 'Cancelled';
@@ -74,6 +79,8 @@ export const TASK_STATUS_OPTIONS: TaskStatus[] = [
 export const TASK_PRIORITY_OPTIONS: TaskPriority[] = [
   'Critical', 'High', 'Medium', 'Low',
 ];
+
+export const EFFORT_OPTIONS = ['0', '1', '2', '3'];
 
 export const PROJECT_COLORS = [
   '#0078D4', '#107C10', '#CA5010', '#8764B8', '#038387',

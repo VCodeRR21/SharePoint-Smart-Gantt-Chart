@@ -6,7 +6,7 @@ import {
 } from '@fluentui/react';
 import {
   ITask, IProject, TaskStatus, TaskPriority,
-  TASK_STATUS_OPTIONS, TASK_PRIORITY_OPTIONS,
+  TASK_STATUS_OPTIONS, TASK_PRIORITY_OPTIONS, EFFORT_OPTIONS,
   STATUS_COLORS, PRIORITY_COLORS, PROJECT_COLORS,
 } from '../../models';
 import { AutocompleteField } from '../common/AutocompleteField';
@@ -39,6 +39,10 @@ const EMPTY: Partial<ITask> = {
   color: '',
   isMilestone: false,
   phase: '',
+  busEffort: '',
+  busImpact: '',
+  hrCompArea: '',
+  hrEffort: '',
 };
 
 export const TaskPanel: React.FC<ITaskPanelProps> = ({
@@ -408,6 +412,59 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
               resizable={false}
               placeholder="Additional notes, links, context…"
             />
+
+            {/* Custom task fields section */}
+            <div style={{
+              borderTop: '1px solid #EDEBE9',
+              paddingTop: 16,
+              marginTop: 8,
+            }}>
+              <Label style={{ display: 'block', marginBottom: 12, fontWeight: 600 }}>Custom Fields</Label>
+
+              <Stack horizontal tokens={{ childrenGap: 12 }}>
+                <Stack.Item grow>
+                  <Dropdown
+                    label="Bus. Effort (0-3)"
+                    selectedKey={form.busEffort || ''}
+                    options={[
+                      { key: '', text: 'None' },
+                      ...EFFORT_OPTIONS.map(v => ({ key: v, text: v })),
+                    ]}
+                    onChange={(_, opt) => set('busEffort', opt?.key || '')}
+                  />
+                </Stack.Item>
+                <Stack.Item grow>
+                  <Dropdown
+                    label="Bus. Impact (0-3)"
+                    selectedKey={form.busImpact || ''}
+                    options={[
+                      { key: '', text: 'None' },
+                      ...EFFORT_OPTIONS.map(v => ({ key: v, text: v })),
+                    ]}
+                    onChange={(_, opt) => set('busImpact', opt?.key || '')}
+                  />
+                </Stack.Item>
+              </Stack>
+
+              <TextField
+                label="HR Comp. Area"
+                value={form.hrCompArea || ''}
+                onChange={(_, v) => set('hrCompArea', v || '')}
+                placeholder="e.g. Engineering, Finance, HR"
+                style={{ marginTop: 12 }}
+              />
+
+              <Dropdown
+                label="HR Effort (0-3)"
+                selectedKey={form.hrEffort || ''}
+                options={[
+                  { key: '', text: 'None' },
+                  ...EFFORT_OPTIONS.map(v => ({ key: v, text: v })),
+                ]}
+                onChange={(_, opt) => set('hrEffort', opt?.key || '')}
+                style={{ marginTop: 12 }}
+              />
+            </div>
           </Stack>
         )}
 
