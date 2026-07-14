@@ -275,6 +275,10 @@ gulp package-solution --ship
 
 Upload `sharepoint/solution/sharepoint-smart-gantt-chart.sppkg` to your **SharePoint App Catalog**.
 
+### Automated releases
+
+Pushing a version tag (e.g. `git tag v1.3.0 && git push origin v1.3.0`) triggers [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds the `.sppkg` and attaches it to a GitHub Release automatically — no other CI runs on this repo (no build/test workflow on ordinary pushes or PRs).
+
 ---
 
 ## How It Works
