@@ -2,7 +2,7 @@ import * as React from 'react';
 import {
   Panel, PanelType, TextField, Dropdown, IDropdownOption,
   PrimaryButton, DefaultButton, Stack, Label, Toggle, Spinner, SpinnerSize,
-  Slider,
+  Slider, MessageBar, MessageBarType,
 } from '@fluentui/react';
 import {
   ITask, IProject, TaskStatus, TaskPriority,
@@ -10,6 +10,7 @@ import {
   STATUS_COLORS, PRIORITY_COLORS, PROJECT_COLORS,
 } from '../../models';
 import { AutocompleteField } from '../common/AutocompleteField';
+import { ColorSwatchPicker } from '../common/ColorSwatchPicker';
 import { toDateOnly } from '../../utils/dateUtils';
 
 interface ITaskPanelProps {
@@ -48,13 +49,17 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
   const [form, setForm] = React.useState<Partial<ITask>>(EMPTY);
   const [saving, setSaving] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const [saveError, setSaveError] = React.useState('');
+  const [dirty, setDirty] = React.useState(false);
   const [activeTab, setActiveTab] = React.useState<'basic' | 'details' | 'links'>('basic');
 
   React.useEffect(() => {
     if (isOpen) {
       setForm(task ? { ...task } : { ...EMPTY });
       setErrors({});
+      setSaveError('');
       setSaving(false);
+      setDirty(false);
       setActiveTab('basic');
     }
   }, [isOpen, task]);
@@ -62,6 +67,12 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
   const set = (field: keyof ITask, value: any): void => {
     setForm(prev => ({ ...prev, [field]: value }));
     setErrors(prev => ({ ...prev, [field]: '' }));
+    setDirty(true);
+  };
+
+  const handleDismiss = (): void => {
+    if (dirty && !saving && !window.confirm('Discard unsaved changes?')) return;
+    onDismiss();
   };
 
   const validate = (): boolean => {
@@ -82,6 +93,7 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
   const handleSave = async (): Promise<void> => {
     if (!validate()) return;
     setSaving(true);
+    setSaveError('');
     try {
       await onSave({
         ...form,
@@ -89,6 +101,8 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
         startDate: toDateOnly(form.startDate),
         dueDate: toDateOnly(form.dueDate),
       });
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Could not save the task.');
     } finally {
       setSaving(false);
     }
@@ -97,12 +111,17 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
   const statusOptions: IDropdownOption[] = TASK_STATUS_OPTIONS.map(s => ({ key: s, text: s }));
   const priorityOptions: IDropdownOption[] = TASK_PRIORITY_OPTIONS.map(p => ({ key: p, text: p }));
 
+  // A task with sub-tasks of its own can't also become a sub-task itself —
+  // the Gantt/List views only render one level of nesting, so a deeper chain
+  // would make those children silently disappear.
+  const hasChildren = !!task && tasks.some(t => t.parentTaskId === task.id);
+
   // Parent task options — exclude self and already-children
   const parentOptions: IDropdownOption[] = [
     { key: '', text: 'None (top-level task)' },
-    ...tasks
+    ...(hasChildren ? [] : tasks
       .filter(t => t.id !== task?.id && !t.parentTaskId)
-      .map(t => ({ key: t.id, text: t.title })),
+      .map(t => ({ key: t.id, text: t.title }))),
   ];
 
   // Tasks available to add as dependencies: not self, not already selected,
@@ -164,7 +183,7 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
       isOpen={isOpen}
       type={PanelType.medium}
       headerText={isEdit ? `Edit: ${task!.title}` : 'New Task'}
-      onDismiss={onDismiss}
+      onDismiss={handleDismiss}
       isFooterAtBottom
       onRenderFooterContent={() => (
         <Stack horizontal tokens={{ childrenGap: 10 }}>
@@ -176,11 +195,22 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
             {saving && <Spinner size={SpinnerSize.small} style={{ marginRight: 6 }} />}
             {saving ? (isEdit ? 'Saving…' : 'Creating…') : (isEdit ? 'Save Changes' : 'Create Task')}
           </PrimaryButton>
-          <DefaultButton text="Cancel" onClick={onDismiss} disabled={saving} />
+          <DefaultButton text="Cancel" onClick={handleDismiss} disabled={saving} />
         </Stack>
       )}
     >
       <div>
+        {saveError && (
+          <MessageBar
+            messageBarType={MessageBarType.error}
+            onDismiss={() => setSaveError('')}
+            dismissButtonAriaLabel="Dismiss"
+            styles={{ root: { marginTop: 8, marginBottom: 12 } }}
+          >
+            {saveError}
+          </MessageBar>
+        )}
+
         {/* Project context banner */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 8,
@@ -298,7 +328,19 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
                 max={100}
                 step={5}
                 value={form.percentComplete || 0}
-                onChange={v => set('percentComplete', v)}
+                onChange={v => {
+                  // Keep status roughly in sync with progress — otherwise a
+                  // task can end up "Completed" at 50% or "Not Started" at 100%
+                  // with nothing flagging the mismatch.
+                  setForm(prev => {
+                    const updates: Partial<ITask> = { percentComplete: v };
+                    if (v === 100 && prev.status !== 'Cancelled') updates.status = 'Completed';
+                    else if (v > 0 && v < 100 && (prev.status === 'Not Started' || prev.status === 'Completed')) updates.status = 'In Progress';
+                    else if (v === 0 && prev.status === 'Completed') updates.status = 'Not Started';
+                    return { ...prev, ...updates };
+                  });
+                  setDirty(true);
+                }}
                 showValue={false}
                 styles={{
                   activeSection: { background: statusColor },
@@ -342,56 +384,12 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
             {/* Bar color override */}
             <div>
               <Label>Custom Bar Color <span style={{ color: '#605E5C', fontWeight: 400 }}>(optional)</span></Label>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6, alignItems: 'center' }}>
-                <div
-                  onClick={() => set('color', '')}
-                  style={{
-                    width: 28, height: 28, borderRadius: '50%',
-                    background: 'linear-gradient(135deg, #ccc 50%, #fff 50%)',
-                    cursor: 'pointer',
-                    border: !form.color ? '3px solid #323130' : '2px solid #EDEBE9',
-                    boxSizing: 'border-box',
-                  }}
-                  title="Auto color"
-                />
-                {PROJECT_COLORS.map(c => (
-                  <div
-                    key={c}
-                    onClick={() => set('color', c)}
-                    style={{
-                      width: 28, height: 28, borderRadius: '50%',
-                      background: c, cursor: 'pointer',
-                      border: form.color === c ? '3px solid #323130' : '2px solid transparent',
-                      outline: form.color === c ? `2px solid ${c}` : 'none',
-                      outlineOffset: 2,
-                      boxSizing: 'border-box',
-                    }}
-                  />
-                ))}
-                {/* Custom color swatch */}
-                <label
-                  title="Pick a custom color"
-                  style={{ position: 'relative', width: 28, height: 28, cursor: 'pointer', flexShrink: 0 }}
-                >
-                  <div style={{
-                    width: 28, height: 28, borderRadius: '50%',
-                    background: form.color && !PROJECT_COLORS.includes(form.color)
-                      ? form.color
-                      : 'conic-gradient(red,yellow,lime,cyan,blue,magenta,red)',
-                    border: form.color && !PROJECT_COLORS.includes(form.color)
-                      ? '3px solid #323130' : '2px solid #EDEBE9',
-                    outline: form.color && !PROJECT_COLORS.includes(form.color)
-                      ? `2px solid ${form.color}` : 'none',
-                    outlineOffset: 2, boxSizing: 'border-box',
-                  }} />
-                  <input
-                    type="color"
-                    value={form.color || '#0078D4'}
-                    onChange={e => set('color', e.target.value)}
-                    style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }}
-                  />
-                </label>
-              </div>
+              <ColorSwatchPicker
+                colors={PROJECT_COLORS}
+                value={form.color || ''}
+                onChange={c => set('color', c)}
+                allowAuto
+              />
               {!form.color && (
                 <div style={{ fontSize: 11, color: '#605E5C', marginTop: 4 }}>
                   Auto: color follows Display Settings
@@ -422,7 +420,9 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
                 onChange={(_, opt) => set('parentTaskId', opt?.key || null)}
               />
               <div style={{ fontSize: 11, color: '#605E5C', marginTop: 4 }}>
-                Makes this a sub-task, shown indented below the parent.
+                {hasChildren
+                  ? 'This task has sub-tasks and cannot be nested under another task.'
+                  : 'Makes this a sub-task, shown indented below the parent.'}
               </div>
             </div>
 

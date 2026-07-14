@@ -11,6 +11,14 @@
   color: #323130;
 }
 
+.webPartTitle {
+  padding: 10px 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #323130;
+  flex-shrink: 0;
+}
+
 .loadingContainer {
   display: flex;
   flex-direction: column;

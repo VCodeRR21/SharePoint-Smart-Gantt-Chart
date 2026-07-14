@@ -294,7 +294,8 @@
   fill: none;
   stroke: #8A8886;
   stroke-width: 1.5;
-  marker-end: url(#arrowhead);
+  // marker-end is set inline per-path (GanttChart.tsx) with the per-instance
+  // uid-scoped marker id — a static id here would never match.
   pointer-events: none;
 }
 

@@ -11,6 +11,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-07-14
+
+### Added
+
+- **Concurrent-edit protection** — task and project saves now carry a SharePoint concurrency token (etag). If someone else saved the same item since you loaded it, your save is rejected with *"This task/project was changed by someone else since you loaded it. Refresh and try again."* instead of silently overwriting their change
+- **Touch and pen support on the Gantt chart** — dragging to move a bar and dragging the edge to resize now work with touch and pen input, not just a mouse (Gantt bars use Pointer Events internally)
+- **Keyboard accessibility**:
+  - List view column headers can be sorted with Enter/Space, not just a click
+  - Kanban cards can be opened with Enter and moved between status columns with the Left/Right arrow keys
+  - The toolbar's project selector and every "⋯" context menu are fully keyboard-operable (Tab + Enter/Space)
+  - Gantt display-settings toggles and swatches now have proper accessible names and keyboard focus
+- **Portfolio "Stats unavailable" state** — a project whose task stats fail to load (permissions, throttling, network) now shows as explicitly unavailable in the Portfolio view and in both portfolio exports, instead of silently rendering as a healthy, empty project
+- **Positional dependency resolution on import** — predecessors referenced by row number or by title are now matched against the tasks actually created from that import, with a warning surfaced (rather than a silent wrong match) when a referenced title is ambiguous
+
+### Changed
+
+- **Import — percent-complete columns**: a column stored as a true Excel percentage (displaying "50%" but holding the raw value `0.5`) now imports as 50, not 0.5
+- **Import — appending to an existing project**: newly imported tasks are now sorted after the project's existing tasks instead of interleaving with them
+- **Import — Planner source**: now pages through all of a user's groups and all of a plan's tasks instead of stopping at the first page, so large plans/tenants no longer import partially with no warning
+- **Import — task creation**: batched into chunked REST requests instead of one request per task, substantially speeding up large imports
+- **Gantt "Critical path highlight"** now only shows the red highlight when the toggle is actually on, instead of whenever critical-path data was being computed for the arrow-display settings
+- **Gantt "Bar Style" (Flat/Gradient)** now applies to the on-screen chart, matching what was already true of the exported image
+- **List view sorting** — Priority and Status columns now sort in their natural order (Critical → Low; workflow order) instead of alphabetically; tasks with no date always sort last regardless of sort direction
+- **Dashboard "Updated this week" / "Completed this week"** now show the most recently modified tasks instead of an arbitrary subset
+- **Deleting a task with sub-tasks** now pages through all of its children (previously capped at 500) and aborts the delete instead of proceeding if re-parenting any child fails
+
+### Fixed
+
+- Gantt timeline no longer snaps back to the earliest task after every task edit or drag — it now only re-centers when the visible date range genuinely changes
+- A milestone with only a due date set (no start date) now renders at the correct date instead of snapping to today, and its dependency arrow no longer detaches from the diamond
+- A sub-task of a sub-task ("grandchild" task) no longer silently disappears from the Gantt and List views; the task panel also now blocks nesting a task under another task if it already has sub-tasks of its own
+- Fixed a race where two people creating projects with the same name at nearly the same time could hit a raw duplicate-name error instead of one of them getting a usable fallback name
+- Fixed a SharePoint list being left behind with no registry entry if project field provisioning failed partway through project creation
+- Fixed the Kanban board's drop-target highlight flickering while dragging a card across other cards in the same column
+- Fixed the toolbar search box causing the entire visible view (Gantt/List/Kanban) to re-render on every keystroke — input is now debounced
+- Fixed task/project save errors being shown behind the still-open edit panel instead of inside it, which could look like the save had silently failed (or succeeded) either way
+- Fixed a numeric dependency reference from Excel/MS Project imports potentially wiring a task's predecessor to the wrong task when titles repeated in the source file
+- Fixed switching the import source between Excel and Planner leaving stale data from whichever source was previously selected
+- Fixed rapid-clicking between two Planner plans in the import panel potentially importing the wrong plan's tasks
+- Fixed the "Dependency arrows" Gantt display setting always resetting to on after a page reload, ignoring the saved preference
+- Fixed a task update potentially applying to the wrong project's task list if the user switched projects while a save was still in flight
+- Fixed the custom color picker (task/project panels) producing an invalid color when given a malformed hex value
+- Fixed the Web Part Title property pane setting having no visible effect — it now renders above the toolbar when set
+- Corrected two stale doc claims: Display Settings persist across reloads via browser local storage (they were never truly session-only), and the bundled `xlsx` package is pinned to SheetJS 0.20.3, not 0.18.5
+
+---
+
 ## [1.2.1] - 2026-06-17
 
 ### Added

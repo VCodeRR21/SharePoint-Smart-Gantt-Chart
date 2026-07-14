@@ -11,6 +11,10 @@ export interface IProject {
   projectManagerEmail: string;
   created: string;
   isArchived?: boolean;
+  /** SharePoint concurrency token from the last read — passed back on update
+   *  so a stale edit is rejected instead of silently overwriting a concurrent
+   *  change. Absent for a project that hasn't been read from SharePoint yet. */
+  etag?: string;
 }
 
 export type ProjectStatus = 'Planning' | 'Active' | 'On Hold' | 'Completed' | 'Cancelled';
@@ -35,6 +39,8 @@ export interface ITask {
   phase: string;
   created: string;
   modified: string;
+  /** SharePoint concurrency token from the last read — see IProject.etag. */
+  etag?: string;
 }
 
 export type TaskStatus = 'Not Started' | 'In Progress' | 'Completed' | 'On Hold' | 'Cancelled';
@@ -54,6 +60,26 @@ export const STATUS_LIGHT_COLORS: Record<TaskStatus, string> = {
   'Completed': '#F1FAF1',
   'On Hold': '#FFF4EC',
   'Cancelled': '#FDF3F4',
+};
+
+// Project status uses its own palette — ProjectStatus and TaskStatus share
+// some labels (Completed, On Hold, Cancelled) but not all (Planning, Active
+// have no TaskStatus equivalent), so they can't share STATUS_COLORS without
+// those two falling back to gray.
+export const PROJECT_STATUS_COLORS: Record<ProjectStatus, string> = {
+  Planning: '#8764B8',
+  Active: '#0078D4',
+  'On Hold': '#CA5010',
+  Completed: '#107C10',
+  Cancelled: '#8B929A',
+};
+
+export const PROJECT_STATUS_LIGHT_COLORS: Record<ProjectStatus, string> = {
+  Planning: '#F3EFF8',
+  Active: '#EFF6FC',
+  'On Hold': '#FFF4EC',
+  Completed: '#F1FAF1',
+  Cancelled: '#F3F2F1',
 };
 
 export const PRIORITY_COLORS: Record<TaskPriority, string> = {
@@ -99,6 +125,9 @@ export interface IProjectTaskStats {
   milestoneCount: number;
   earliestStart: string;
   latestDue: string;
+  /** Stats could not be loaded (permissions/throttling/network) — render as
+   *  "unavailable" rather than a healthy empty project. */
+  statsError?: boolean;
 }
 
 // ─── Gantt display settings ───────────────────────────────────────────────────

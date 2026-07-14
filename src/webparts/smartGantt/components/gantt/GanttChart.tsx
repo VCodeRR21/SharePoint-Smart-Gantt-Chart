@@ -65,8 +65,13 @@ function taskDuration(task: ITask): number {
   return Math.max(1, differenceInCalendarDays(e, s) + 1);
 }
 
+const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
 function getTaskColor(task: ITask, settings: IGanttDisplaySettings): string {
-  if (task.color) return task.color;
+  // task.color is free-form user input (models/index.ts) — a stray value
+  // (short hex, a CSS name, import garbage) must not flow into SVG color
+  // attributes unvalidated, or the bar renders with NaN-derived colors.
+  if (task.color && HEX_COLOR_RE.test(task.color)) return task.color;
   if (settings.colorBy === 'priority') return PRIORITY_COLORS[task.priority] || '#0078D4';
   if (settings.colorBy === 'phase' && task.phase) return phaseColor(task.phase);
   if (settings.colorBy === 'health') return healthColor(computeTaskHealth(task));
@@ -74,10 +79,20 @@ function getTaskColor(task: ITask, settings: IGanttDisplaySettings): string {
 }
 
 function hexToRgba(hex: string, alpha: number): string {
+  if (!HEX_COLOR_RE.test(hex)) hex = '#0078D4';
+  if (hex.length === 4) {
+    hex = `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`;
+  }
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r},${g},${b},${alpha})`;
+}
+
+// SVG ids can't contain '#'; gradients are keyed by color so distinct tasks
+// sharing a color share one <linearGradient> def instead of emitting one per bar.
+function colorId(hex: string): string {
+  return hex.replace('#', '');
 }
 
 let ganttInstanceCounter = 0;
@@ -99,8 +114,13 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
   const leftBodyRef = React.useRef<HTMLDivElement>(null);
 
   // Unique per-instance prefix so SVG defs (gradients, markers) don't collide
-  // when two Smart Gantt web parts render on the same page.
-  const uid = React.useRef(`sg${++ganttInstanceCounter}`).current;
+  // when two Smart Gantt web parts render on the same page. Lazily
+  // initialized so the module counter increments once per mount, not once
+  // per render (React.useRef(expr) evaluates expr on every render even
+  // though only the first value is kept).
+  const uidRef = React.useRef<string>();
+  if (!uidRef.current) uidRef.current = `sg${++ganttInstanceCounter}`;
+  const uid = uidRef.current;
 
   const [dragState, setDragState] = React.useState<IDragState | null>(null);
   const [dragOffsets, setDragOffsets] = React.useState<Map<number, { start: Date; end: Date }>>(new Map());
@@ -137,16 +157,29 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
   );
 
   const violationIds = React.useMemo(() => {
+    const byId = new Map(tasks.map(t => [t.id, t]));
     const set = new Set<number>();
-    tasks.forEach(t => { if (hasDependencyViolation(t, tasks)) set.add(t.id); });
+    tasks.forEach(t => { if (hasDependencyViolation(t, byId)) set.add(t.id); });
     return set;
   }, [tasks]);
+
+  // One gradient per distinct bar color rather than one per task — with
+  // hundreds of tasks sharing the same status/phase/priority palette this
+  // keeps the <defs> count near the palette size instead of the task count.
+  const distinctBarColors = React.useMemo(
+    () => Array.from(new Set(tasks.map(t => getTaskColor(t, settings)))),
+    [tasks, settings]
+  );
 
   const getWeekLabel = (weekDate: Date): string => {
     if (settings.weekLabel === 'dates') return format(weekDate, 'MMM d');
     if (settings.weekLabel === 'project') {
       const diff = differenceInCalendarDays(weekDate, projectWeekStart);
-      const wn = Math.max(1, Math.floor(diff / 7) + 1);
+      // The BUFFER_DAYS lead-in before the earliest task falls before week 1;
+      // clamping it to "W1" made several consecutive header bands share that
+      // label, indistinguishable from the real week 1.
+      if (diff < 0) return '';
+      const wn = Math.floor(diff / 7) + 1;
       return `W${wn}`;
     }
     return `W${getISOWeek(weekDate)}`;
@@ -168,8 +201,28 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
 
   const totalDays = differenceInCalendarDays(rangeEnd, rangeStart) + 1;
   const svgWidth = totalDays * dayWidth;
-  const visibleTasks = buildVisibleRows(tasks, collapsedPhases);
+  // Rebuilding this per render is otherwise the most expensive step in the
+  // component — it runs on every mousemove during a drag and every tooltip
+  // hover, neither of which change tasks/collapsedPhases.
+  const visibleTasks = React.useMemo(
+    () => buildVisibleRows(tasks, collapsedPhases),
+    [tasks, collapsedPhases]
+  );
   const svgBodyHeight = visibleTasks.length * ROW_H;
+
+  // Shared by renderDependencyArrows on every render (including drag/hover
+  // renders that don't change tasks/visibleTasks) — hoisted so those renders
+  // don't rebuild both maps from scratch each time.
+  const taskById = React.useMemo(() => new Map(tasks.map(t => [t.id, t])), [tasks]);
+  const rowIndexById = React.useMemo(() => {
+    const map = new Map<number, number>();
+    // Row positions must come from the *visible* rows (phase headers shift
+    // and reorder everything), not from the raw tasks array.
+    visibleTasks.forEach((row, i) => {
+      if (row.type === 'task' && row.task) map.set(row.task.id, i);
+    });
+    return map;
+  }, [visibleTasks]);
 
   // Convert date ↔ x
   const dateToX = (d: Date): number =>
@@ -205,7 +258,12 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
 
     bodyScrollRef.current.scrollLeft = scrollX;
     if (headerScrollRef.current) headerScrollRef.current.scrollLeft = scrollX;
-  }, [scrollToToday, rangeStart, dayWidth]); // eslint-disable-line react-hooks/exhaustive-deps
+    // rangeStart is a new Date object every render the task list changes
+    // (even when the *value* is unchanged — e.g. editing an unrelated field
+    // triggers a task refetch), so depending on it directly would re-snap
+    // the viewport away from wherever the user scrolled after every edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollToToday, rangeStart.getTime(), dayWidth]);
 
   // Sync scroll between panels
   const handleBodyScroll = (): void => {
@@ -222,9 +280,14 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
   };
 
   // ─── Drag handlers ─────────────────────────────────────────────────────
+  // Pointer Events (rather than mouse-only) so dragging/resizing bars also
+  // works with touch and pen input, which SharePoint pages are commonly
+  // viewed on (tablets). The window-level pointermove/pointerup listeners
+  // below still receive events normally — capture isn't needed since the
+  // events keep bubbling to window regardless of which element they target.
 
-  const handleBarMouseDown = (
-    e: React.MouseEvent,
+  const handleBarPointerDown = (
+    e: React.PointerEvent,
     task: ITask,
     mode: DragMode
   ): void => {
@@ -243,13 +306,22 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
     });
   };
 
+  // Last deltaDays actually applied during the current drag — a day is
+  // several pixels wide, so most raw pointermove events round to the same
+  // delta and would otherwise re-render the whole chart (bars, arrows, left
+  // panel) for no visible change.
+  const lastDeltaRef = React.useRef<number | null>(null);
+
   React.useEffect(() => {
     if (!dragState) return;
+    lastDeltaRef.current = null;
 
-    const handleMouseMove = (e: MouseEvent): void => {
+    const handlePointerMove = (e: PointerEvent): void => {
       const dx = e.clientX - dragState.startClientX;
       if (Math.abs(dx) > 3) suppressClickRef.current = true;
       const deltaDays = Math.round(dx / dayWidth);
+      if (deltaDays === lastDeltaRef.current) return;
+      lastDeltaRef.current = deltaDays;
       const newMap = new Map(dragOffsetsRef.current);
 
       if (deltaDays === 0) {
@@ -281,7 +353,7 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
       setDragOffsets(newMap);
     };
 
-    const handleMouseUp = (): void => {
+    const handlePointerUp = (): void => {
       const offset = dragOffsetsRef.current.get(dragState.taskId);
       if (offset) {
         suppressClickRef.current = true;
@@ -295,11 +367,13 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
       setDragOffsets(new Map());
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
     };
   }, [dragState, dayWidth]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -394,7 +468,11 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
 
   const renderTaskBar = (task: ITask, rowIndex: number): React.ReactNode => {
     const offset = dragOffsets.get(task.id);
-    const sDate = offset ? offset.start : (parseDateOnly(task.startDate) || today);
+    // A milestone with only a due date set should render there rather than
+    // snapping to today — matches the dependency-arrow fallback below, which
+    // anchors on the same date so arrows don't detach from the diamond.
+    const sDate = offset ? offset.start
+      : (parseDateOnly(task.startDate) || (task.isMilestone ? parseDateOnly(task.dueDate) : null) || today);
     const eDate = offset ? offset.end : (parseDateOnly(task.dueDate) || today);
 
     const x = dateToX(sDate);
@@ -405,15 +483,25 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
     const y = rowIndex * ROW_H + BAR_OFFSET;
     const color = getTaskColor(task, settings);
     const progressWidth = barWidth * (task.percentComplete / 100);
+    // Raw critical-path membership — used for the dependency-arrow color/width
+    // logic regardless of the display toggle below.
     const isCritical = criticalIds.has(task.id);
+    // Bar/milestone decoration only shows when the user has actually turned
+    // on "Critical path highlight"; criticalIds itself is also populated for
+    // showCriticalPathOnly (arrow visibility), which must not force the
+    // outline on when that display toggle is off.
+    const highlightCritical = settings.showCriticalPath && isCritical;
 
     if (task.isMilestone) {
       const mx = dateToX(sDate) + dayWidth / 2;
       const my = rowIndex * ROW_H + ROW_H / 2;
+      const milestoneAriaLabel = `${task.title}, milestone, ${formatDateOnly(dateToDateOnlyString(sDate), 'MMM d, yyyy')}`;
       return (
         <g
           key={`bar-${task.id}`}
           className={styles.taskBarGroup}
+          role="img"
+          aria-label={milestoneAriaLabel}
           onClick={() => onEditTask(task)}
           onMouseEnter={e => setTooltip({ x: e.clientX, y: e.clientY, task })}
           onMouseLeave={() => setTooltip(null)}
@@ -421,22 +509,20 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
           <polygon
             points={`${mx},${my - MILESTONE_SIZE} ${mx + MILESTONE_SIZE},${my} ${mx},${my + MILESTONE_SIZE} ${mx - MILESTONE_SIZE},${my}`}
             fill={color}
-            stroke={isCritical ? '#D13438' : 'white'}
+            stroke={highlightCritical ? '#D13438' : 'white'}
             strokeWidth="1.5"
           />
         </g>
       );
     }
 
-    const gradientId = `${uid}-grad-${task.id}`;
+    // "Flat" bar style fills with the plain color; "Gradient" (default)
+    // references the shared per-color gradient hoisted into the SVG's <defs>.
+    const progressFill = settings.barStyle === 'flat' ? color : `url(#${uid}-grad-${colorId(color)})`;
+    const barAriaLabel = `${task.title}, ${formatDateOnly(task.startDate, 'MMM d, yyyy')} to `
+      + `${formatDateOnly(task.dueDate, 'MMM d, yyyy')}, ${task.percentComplete}% complete`;
     return (
-      <g key={`bar-${task.id}`} className={styles.taskBarGroup}>
-        <defs>
-          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="1" />
-            <stop offset="100%" stopColor={color} stopOpacity="0.75" />
-          </linearGradient>
-        </defs>
+      <g key={`bar-${task.id}`} className={styles.taskBarGroup} role="img" aria-label={barAriaLabel}>
         {/* Background bar */}
         <rect
           x={x}
@@ -445,15 +531,15 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
           height={BAR_HEIGHT}
           rx={4}
           fill={hexToRgba(color, 0.18)}
-          stroke={isCritical ? '#D13438' : undefined}
-          strokeWidth={isCritical ? 1.5 : undefined}
-          strokeDasharray={isCritical ? '4,2' : undefined}
+          stroke={highlightCritical ? '#D13438' : undefined}
+          strokeWidth={highlightCritical ? 1.5 : undefined}
+          strokeDasharray={highlightCritical ? '4,2' : undefined}
           className={styles.taskBar}
-          onMouseDown={e => handleBarMouseDown(e, task, 'move')}
+          onPointerDown={e => handleBarPointerDown(e, task, 'move')}
           onClick={() => handleBarClick(task)}
           onMouseEnter={e => setTooltip({ x: e.clientX, y: e.clientY, task })}
           onMouseLeave={() => setTooltip(null)}
-          style={{ cursor: dragState ? 'grabbing' : 'grab' }}
+          style={{ cursor: dragState ? 'grabbing' : 'grab', touchAction: 'none' }}
         />
         {/* Progress fill */}
         {progressWidth > 0 && (
@@ -463,7 +549,7 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
             width={Math.min(progressWidth, barWidth)}
             height={BAR_HEIGHT}
             rx={4}
-            fill={`url(#${gradientId})`}
+            fill={progressFill}
             pointerEvents="none"
           />
         )}
@@ -506,8 +592,8 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
           fill={color}
           opacity={0.5}
           className={styles.taskBarResizeHandle}
-          onMouseDown={e => handleBarMouseDown(e, task, 'resize-start')}
-          style={{ cursor: 'ew-resize' }}
+          onPointerDown={e => handleBarPointerDown(e, task, 'resize-start')}
+          style={{ cursor: 'ew-resize', touchAction: 'none' }}
         />
         <rect
           x={x + barWidth - 8}
@@ -518,22 +604,14 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
           fill={color}
           opacity={0.5}
           className={styles.taskBarResizeHandle}
-          onMouseDown={e => handleBarMouseDown(e, task, 'resize-end')}
-          style={{ cursor: 'ew-resize' }}
+          onPointerDown={e => handleBarPointerDown(e, task, 'resize-end')}
+          style={{ cursor: 'ew-resize', touchAction: 'none' }}
         />
       </g>
     );
   };
 
   const renderDependencyArrows = (): React.ReactNode => {
-    const taskById = new Map(tasks.map(t => [t.id, t]));
-    // Row positions must come from the *visible* rows (phase headers shift and
-    // reorder everything), not from the raw tasks array.
-    const rowIndexById = new Map<number, number>();
-    visibleTasks.forEach((row, i) => {
-      if (row.type === 'task' && row.task) rowIndexById.set(row.task.id, i);
-    });
-
     const arrows: React.ReactNode[] = [];
     visibleTasks.forEach((row, rowIndex) => {
       if (row.type !== 'task' || !row.task) return;
@@ -871,6 +949,12 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
                 <marker id={`${uid}-arrow-crit`} markerWidth="4" markerHeight="3" refX="3.5" refY="1.5" orient="auto">
                   <polygon points="0 0, 4 1.5, 0 3" fill="#D13438" />
                 </marker>
+                {settings.barStyle !== 'flat' && distinctBarColors.map(c => (
+                  <linearGradient key={c} id={`${uid}-grad-${colorId(c)}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={c} stopOpacity="1" />
+                    <stop offset="100%" stopColor={c} stopOpacity="0.75" />
+                  </linearGradient>
+                ))}
               </defs>
 
               {/* Weekend columns */}
@@ -1036,22 +1120,29 @@ function buildVisibleRows(tasks: ITask[], collapsedPhases: Set<string>): IVisibl
     subtaskMap.get(t.parentTaskId!)!.push(t);
   });
 
-  const addTask = (task: ITask): void => {
-    rows.push({ type: 'task', task, isChild: false });
+  // Recurse through every nesting level (a sub-task can itself have
+  // sub-tasks — e.g. via a direct list edit or import, even though the Task
+  // panel's parent picker prevents creating it through the UI) so deeper
+  // descendants are flattened into view instead of silently vanishing.
+  // `visited` guards against a parent-cycle in the raw data looping forever.
+  const addTask = (task: ITask, visited: Set<number> = new Set()): void => {
+    rows.push({ type: 'task', task, isChild: visited.size > 0 });
+    if (visited.has(task.id)) return;
+    visited.add(task.id);
     const children = subtaskMap.get(task.id);
     if (children) {
-      children.forEach(c => rows.push({ type: 'task', task: c, isChild: true }));
+      children.forEach(c => addTask(c, visited));
     }
   };
 
   byPhase.forEach((phaseTasks, phase) => {
     rows.push({ type: 'phase', phase });
     if (!collapsedPhases.has(phase)) {
-      phaseTasks.forEach(addTask);
+      phaseTasks.forEach(t => addTask(t));
     }
   });
 
-  noPhase.forEach(addTask);
+  noPhase.forEach(t => addTask(t));
 
   return rows;
 }

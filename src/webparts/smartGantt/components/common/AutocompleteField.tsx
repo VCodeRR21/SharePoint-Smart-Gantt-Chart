@@ -21,6 +21,10 @@ export const AutocompleteField: React.FC<IAutocompleteFieldProps> = ({
   const filtered = value
     ? suggestions.filter(s => s.toLowerCase().includes(value.toLowerCase()) && s !== value)
     : suggestions;
+  // Only the first 12 matches are ever rendered — clamp keyboard navigation
+  // and Enter-to-commit to that same window, or ArrowDown past the 12th item
+  // could highlight (and Enter could commit) an option the user never saw.
+  const visible = filtered.slice(0, 12);
 
   // Close on outside click
   React.useEffect(() => {
@@ -35,19 +39,19 @@ export const AutocompleteField: React.FC<IAutocompleteFieldProps> = ({
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
-    if (!open || filtered.length === 0) {
-      if (e.key === 'ArrowDown' && filtered.length > 0) { setOpen(true); setHighlighted(0); }
+    if (!open || visible.length === 0) {
+      if (e.key === 'ArrowDown' && visible.length > 0) { setOpen(true); setHighlighted(0); }
       return;
     }
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setHighlighted(h => Math.min(h + 1, filtered.length - 1));
+      setHighlighted(h => Math.min(h + 1, visible.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setHighlighted(h => Math.max(h - 1, 0));
     } else if (e.key === 'Enter' && highlighted >= 0) {
       e.preventDefault();
-      onChange(filtered[highlighted]);
+      onChange(visible[highlighted]);
       setOpen(false);
       setHighlighted(-1);
     } else if (e.key === 'Escape') {
@@ -68,9 +72,9 @@ export const AutocompleteField: React.FC<IAutocompleteFieldProps> = ({
         onKeyDown={handleKeyDown}
         autoComplete="off"
       />
-      {open && filtered.length > 0 && (
+      {open && visible.length > 0 && (
         <div className={styles.dropdown}>
-          {filtered.slice(0, 12).map((s, i) => (
+          {visible.map((s, i) => (
             <div
               key={s}
               className={`${styles.option} ${i === highlighted ? styles.highlighted : ''}`}

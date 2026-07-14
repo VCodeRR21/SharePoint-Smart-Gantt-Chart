@@ -73,7 +73,47 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
   // Monotonic token so a slow task fetch for a previously selected project
   // can't overwrite the tasks of the currently selected one.
   private _taskLoadSeq = 0;
+  // Same idea for portfolio stats — a fetch kicked off before the project
+  // list finished loading (over an empty array) must not clobber a later,
+  // correct fetch that raced ahead of it.
+  private _portfolioLoadSeq = 0;
   private _prefsKey: string;
+
+  // Manual memoization for a class component: these derived values are
+  // recomputed on every render otherwise (a class component has no useMemo),
+  // including renders triggered by unrelated state like a callout toggling —
+  // and filteredTasks in particular feeds the Gantt/List/Kanban view, so
+  // recomputing it needlessly means those re-render with new array
+  // identities too, defeating any memoization further down.
+  private _visibleProjectsCache: { projects: IProject[]; showArchived: boolean; result: IProject[] } | null = null;
+  private _knownListsCache: { tasks: ITask[]; phases: string[]; users: string[] } | null = null;
+  private _filteredTasksCache: { tasks: ITask[]; filter: ITaskFilter; result: ITask[] } | null = null;
+
+  private _getVisibleProjects(projects: IProject[], showArchived: boolean): IProject[] {
+    const c = this._visibleProjectsCache;
+    if (c && c.projects === projects && c.showArchived === showArchived) return c.result;
+    const result = showArchived ? projects : projects.filter(p => !p.isArchived);
+    this._visibleProjectsCache = { projects, showArchived, result };
+    return result;
+  }
+
+  private _getKnownLists(tasks: ITask[]): { phases: string[]; users: string[] } {
+    const c = this._knownListsCache;
+    if (c && c.tasks === tasks) return c;
+    const phases = Array.from(new Set(tasks.map(t => t.phase).filter(Boolean))).sort();
+    const users = Array.from(new Set(tasks.map(t => t.assignedTo).filter(Boolean))).sort();
+    const result = { tasks, phases, users };
+    this._knownListsCache = result;
+    return result;
+  }
+
+  private _getFilteredTasks(tasks: ITask[], filter: ITaskFilter): ITask[] {
+    const c = this._filteredTasksCache;
+    if (c && c.tasks === tasks && c.filter === filter) return c.result;
+    const result = filterTasks(tasks, filter);
+    this._filteredTasksCache = { tasks, filter, result };
+    return result;
+  }
 
   constructor(props: ISmartGanttProps) {
     super(props);
@@ -102,15 +142,24 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
       showImportPanel: false,
       showImportAsProject: false,
       showGanttSettings: false,
-      ganttSettings: { ...DEFAULT_GANTT_SETTINGS, ...prefs.ganttSettings, showDependencies: true },
+      ganttSettings: { ...DEFAULT_GANTT_SETTINGS, ...prefs.ganttSettings },
       taskFilter: EMPTY_TASK_FILTER,
       portfolioStats: null,
       portfolioLoading: false,
     };
   }
 
+  private _scrollToTodayTimer: ReturnType<typeof setTimeout> | null = null;
+  private _isMounted = false;
+
   public async componentDidMount(): Promise<void> {
+    this._isMounted = true;
     await this._loadProjects();
+  }
+
+  public componentWillUnmount(): void {
+    this._isMounted = false;
+    if (this._scrollToTodayTimer !== null) clearTimeout(this._scrollToTodayTimer);
   }
 
   public componentDidUpdate(_prevProps: ISmartGanttProps, prevState: ISmartGanttState): void {
@@ -163,6 +212,7 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
     try {
       this.setState({ loading: true, error: null });
       const projects = await this.props.spService.getProjects();
+      if (!this._isMounted) return;
       const visible = projects.filter(p => !p.isArchived);
       // Keep the current (or persisted) selection when it still exists,
       // instead of always snapping back to the first project.
@@ -170,15 +220,30 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
         ?? this.state.selectedProject?.id
         ?? this._loadPrefs().selectedProjectId
         ?? undefined;
+      // Prefer a visible (non-archived) match so a persisted/previous
+      // selection that's since been archived doesn't restore a project the
+      // toolbar's project list isn't currently showing.
       const selectedProject =
-        projects.find(p => p.id === wantedId) || visible[0] || projects[0] || null;
+        visible.find(p => p.id === wantedId)
+        || (this.state.showArchivedProjects ? projects.find(p => p.id === wantedId) : undefined)
+        || visible[0]
+        || null;
       this.setState({ projects, selectedProject, loading: false });
       if (selectedProject) {
         await this._loadTasks(selectedProject.listName);
       } else {
         this.setState({ tasks: [] });
       }
+      // Persisted view can be 'portfolio' on first mount, or the project
+      // list can change (create/delete/archive) while portfolio is active —
+      // either way, refresh stats against the just-loaded project list. This
+      // also resolves any stats fetch that raced ahead using an empty/stale
+      // project array (see the seq guard in _loadPortfolioStats).
+      if (this._isMounted && this.state.viewMode === 'portfolio') {
+        void this._loadPortfolioStats();
+      }
     } catch (err) {
+      if (!this._isMounted) return;
       this.setState({
         loading: false,
         error: this._errMessage(err, 'Failed to load projects. Check site permissions.'),
@@ -191,10 +256,10 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
     this.setState({ tasksLoading: true, tasksError: null });
     try {
       const tasks = await this.props.spService.getProjectTasks(listName);
-      if (seq !== this._taskLoadSeq) return; // stale response — a newer load won
+      if (seq !== this._taskLoadSeq || !this._isMounted) return; // stale response — a newer load won
       this.setState({ tasks, tasksLoading: false });
     } catch (err) {
-      if (seq !== this._taskLoadSeq) return;
+      if (seq !== this._taskLoadSeq || !this._isMounted) return;
       this.setState({
         tasks: [],
         tasksLoading: false,
@@ -216,9 +281,19 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
   };
 
   private _loadPortfolioStats = async (): Promise<void> => {
+    const seq = ++this._portfolioLoadSeq;
     this.setState({ portfolioLoading: true });
-    const stats = await this.props.spService.getAllProjectStats(this.state.projects);
-    this.setState({ portfolioStats: stats, portfolioLoading: false });
+    try {
+      const stats = await this.props.spService.getAllProjectStats(this.state.projects);
+      if (seq !== this._portfolioLoadSeq || !this._isMounted) return;
+      this.setState({ portfolioStats: stats, portfolioLoading: false });
+    } catch (err) {
+      if (seq !== this._portfolioLoadSeq || !this._isMounted) return;
+      this.setState({
+        portfolioLoading: false,
+        saveError: this._errMessage(err, 'Failed to load portfolio statistics.'),
+      });
+    }
   };
 
   private _handleZoomChange = (zoomLevel: ZoomLevel): void => {
@@ -227,7 +302,11 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
 
   private _handleScrollToToday = (): void => {
     this.setState({ scrollToToday: true }, () => {
-      setTimeout(() => this.setState({ scrollToToday: false }), 100);
+      if (this._scrollToTodayTimer !== null) clearTimeout(this._scrollToTodayTimer);
+      this._scrollToTodayTimer = setTimeout(() => {
+        this._scrollToTodayTimer = null;
+        if (this._isMounted) this.setState({ scrollToToday: false });
+      }, 100);
     });
   };
 
@@ -260,13 +339,18 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
           projects: [...prev.projects, created],
           selectedProject: created,
           tasks: [],
+          // A filter carried over from the previous project could hide every
+          // task in this brand-new one, with no visible way to tell why.
+          taskFilter: EMPTY_TASK_FILTER,
         }));
       }
       this.setState({ showProjectPanel: false, editingProject: null, portfolioStats: null });
     } catch (err) {
-      this.setState({
-        saveError: `Could not save the project: ${this._errMessage(err, 'unknown error')}`,
-      });
+      const message = `Could not save the project: ${this._errMessage(err, 'unknown error')}`;
+      this.setState({ saveError: message });
+      // Re-thrown so the still-open panel can show the error inline instead
+      // of it only appearing behind the modal overlay.
+      throw new Error(message);
     }
   };
 
@@ -372,9 +456,11 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
       await this._loadTasks(selectedProject.listName);
       this.setState({ showTaskPanel: false, editingTask: null, portfolioStats: null });
     } catch (err) {
-      this.setState({
-        saveError: `Could not save the task: ${this._errMessage(err, 'unknown error')}`,
-      });
+      const message = `Could not save the task: ${this._errMessage(err, 'unknown error')}`;
+      this.setState({ saveError: message });
+      // Re-thrown so the still-open panel can show the error inline instead
+      // of it only appearing behind the modal overlay.
+      throw new Error(message);
     }
   };
 
@@ -401,8 +487,41 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
   private _handleExportImage = async (): Promise<void> => {
     const { selectedProject, tasks, ganttSettings } = this.state;
     if (!selectedProject) return;
-    const svg = renderGanttSVG(selectedProject, tasks, ganttSettings);
-    await downloadPNG(svg, `${selectedProject.title} - Gantt Chart.png`, 2);
+    try {
+      const svg = renderGanttSVG(selectedProject, tasks, ganttSettings);
+      await downloadPNG(svg, `${selectedProject.title} - Gantt Chart.png`, 2);
+    } catch (err) {
+      this.setState({
+        saveError: `Image export failed: ${this._errMessage(err, 'unknown error')}`,
+      });
+    }
+  };
+
+  // Hoisted from inline render-body arrows so Toolbar/FilterBar (wrapped in
+  // React.memo) get stable prop identities and can actually skip re-rendering.
+  private _handleToggleShowArchived = (): void => {
+    this.setState(s => ({ showArchivedProjects: !s.showArchivedProjects }));
+  };
+
+  private _handleShowImportPanel = (): void => {
+    this.setState({ showImportPanel: true });
+  };
+
+  private _handleShowImportAsProject = (): void => {
+    this.setState({ showImportAsProject: true });
+  };
+
+  private _handleExportExcel = (): void => {
+    const { selectedProject, tasks } = this.state;
+    if (selectedProject) exportTasksToExcel(selectedProject, tasks);
+  };
+
+  private _handleToggleGanttSettings = (): void => {
+    this.setState(s => ({ showGanttSettings: !s.showGanttSettings }));
+  };
+
+  private _handleFilterChange = (f: ITaskFilter): void => {
+    this.setState({ taskFilter: f });
   };
 
   private _handleExportPowerPoint = async (): Promise<void> => {
@@ -434,13 +553,19 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
   private _handleTaskUpdate = async (taskId: number, updates: Partial<ITask>): Promise<void> => {
     const { selectedProject } = this.state;
     if (!selectedProject) return;
+    // Task IDs are only unique within a project's list — capture which
+    // project this update belongs to so a project switch mid-flight can't
+    // patch/reload the wrong project's tasks.
+    const projectId = selectedProject.id;
     // Optimistic update
-    this.setState(prev => ({
-      tasks: prev.tasks.map(t => t.id === taskId ? { ...t, ...updates } : t),
-    }));
+    this.setState(prev => {
+      if (prev.selectedProject?.id !== projectId) return null;
+      return { tasks: prev.tasks.map(t => t.id === taskId ? { ...t, ...updates } : t) };
+    });
     try {
       await this.props.spService.updateTask(selectedProject.listName, taskId, updates);
     } catch (err) {
+      if (this.state.selectedProject?.id !== projectId) return;
       // Revert on error
       this.setState({
         saveError: `Could not update the task: ${this._errMessage(err, 'unknown error')}`,
@@ -460,17 +585,17 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
       taskFilter, portfolioStats, portfolioLoading,
     } = this.state;
 
-    const visibleProjects = showArchivedProjects ? projects : projects.filter(p => !p.isArchived);
+    const visibleProjects = this._getVisibleProjects(projects, showArchivedProjects);
     const hasArchivedProjects = projects.some(p => p.isArchived);
 
     // Derive autocomplete/filter lists from the full task set
-    const knownPhases = Array.from(new Set(tasks.map(t => t.phase).filter(Boolean))).sort();
-    const knownUsers = Array.from(new Set(tasks.map(t => t.assignedTo).filter(Boolean))).sort();
+    const { phases: knownPhases, users: knownUsers } = this._getKnownLists(tasks);
 
-    const filteredTasks = filterTasks(tasks, taskFilter);
+    const filteredTasks = this._getFilteredTasks(tasks, taskFilter);
 
     return (
       <div className={styles.smartGantt}>
+        {this.props.title && <div className={styles.webPartTitle}>{this.props.title}</div>}
         <Toolbar
           projects={visibleProjects}
           selectedProject={selectedProject}
@@ -489,18 +614,18 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
           onUnarchiveProject={this._handleUnarchiveProject}
           showArchivedProjects={showArchivedProjects}
           hasArchivedProjects={hasArchivedProjects}
-          onToggleShowArchived={() => this.setState(s => ({ showArchivedProjects: !s.showArchivedProjects }))}
-          onImport={() => this.setState({ showImportPanel: true })}
-          onImportAsProject={() => this.setState({ showImportAsProject: true })}
-          onExportExcel={() => { if (selectedProject) exportTasksToExcel(selectedProject, tasks); }}
+          onToggleShowArchived={this._handleToggleShowArchived}
+          onImport={this._handleShowImportPanel}
+          onImportAsProject={this._handleShowImportAsProject}
+          onExportExcel={this._handleExportExcel}
           onExportImage={this._handleExportImage}
           onExportPowerPoint={this._handleExportPowerPoint}
           onPortfolioExportExcel={this._handlePortfolioExportExcel}
           onPortfolioExportPowerPoint={this._handlePortfolioExportPowerPoint}
-          onOpenSettings={() => this.setState(s => ({ showGanttSettings: !s.showGanttSettings }))}
+          onOpenSettings={this._handleToggleGanttSettings}
           showSettings={showGanttSettings}
           taskFilter={taskFilter}
-          onFilterChange={f => this.setState({ taskFilter: f })}
+          onFilterChange={this._handleFilterChange}
           knownUsers={knownUsers}
           knownPhases={knownPhases}
           filteredCount={filteredTasks.length}
@@ -673,6 +798,7 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
           <ImportPanel
             isOpen={showImportPanel}
             project={selectedProject}
+            existingTasks={tasks}
             spService={this.props.spService}
             context={this.props.context}
             onDismiss={() => this.setState({ showImportPanel: false })}

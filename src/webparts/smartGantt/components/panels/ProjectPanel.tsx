@@ -2,9 +2,11 @@ import * as React from 'react';
 import {
   Panel, PanelType, TextField, Dropdown, IDropdownOption,
   PrimaryButton, DefaultButton, Stack, Label, Spinner, SpinnerSize,
+  MessageBar, MessageBarType,
 } from '@fluentui/react';
 import { IProject, PROJECT_COLORS, PROJECT_STATUS_OPTIONS, ProjectStatus } from '../../models';
 import { toDateOnly } from '../../utils/dateUtils';
+import { ColorSwatchPicker } from '../common/ColorSwatchPicker';
 
 interface IProjectPanelProps {
   isOpen: boolean;
@@ -24,6 +26,8 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
   const [status, setStatus] = React.useState<ProjectStatus>('Active');
   const [saving, setSaving] = React.useState(false);
   const [errors, setErrors] = React.useState<Record<string, string>>({});
+  const [saveError, setSaveError] = React.useState('');
+  const [dirty, setDirty] = React.useState(false);
 
   // Populate form when editing
   React.useEffect(() => {
@@ -44,7 +48,9 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         setStatus('Active');
       }
       setErrors({});
+      setSaveError('');
       setSaving(false);
+      setDirty(false);
     }
   }, [isOpen, project]);
 
@@ -59,6 +65,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
   const handleSave = async (): Promise<void> => {
     if (!validate()) return;
     setSaving(true);
+    setSaveError('');
     try {
       await onSave({
         title: title.trim(),
@@ -67,10 +74,18 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         startDate,
         dueDate,
         status,
+        etag: project?.etag,
       });
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : 'Could not save the project.');
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleDismiss = (): void => {
+    if (dirty && !saving && !window.confirm('Discard unsaved changes?')) return;
+    onDismiss();
   };
 
   const statusOptions: IDropdownOption[] = PROJECT_STATUS_OPTIONS.map(s => ({ key: s, text: s }));
@@ -80,7 +95,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
       isOpen={isOpen}
       type={PanelType.smallFixedFar}
       headerText={isEdit ? 'Edit Project' : 'New Project'}
-      onDismiss={onDismiss}
+      onDismiss={handleDismiss}
       isFooterAtBottom
       onRenderFooterContent={() => (
         <Stack horizontal tokens={{ childrenGap: 10 }}>
@@ -92,16 +107,26 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
             {saving && <Spinner size={SpinnerSize.small} style={{ marginRight: 6 }} />}
             {saving ? (isEdit ? 'Saving…' : 'Creating…') : undefined}
           </PrimaryButton>
-          <DefaultButton text="Cancel" onClick={onDismiss} disabled={saving} />
+          <DefaultButton text="Cancel" onClick={handleDismiss} disabled={saving} />
         </Stack>
       )}
     >
+      {saveError && (
+        <MessageBar
+          messageBarType={MessageBarType.error}
+          onDismiss={() => setSaveError('')}
+          dismissButtonAriaLabel="Dismiss"
+          styles={{ root: { marginTop: 12 } }}
+        >
+          {saveError}
+        </MessageBar>
+      )}
       <Stack tokens={{ childrenGap: 16 }} style={{ marginTop: 20 }}>
         {/* Project name */}
         <TextField
           label="Project Name"
           value={title}
-          onChange={(_, v) => { setTitle(v || ''); setErrors(p => ({ ...p, title: '' })); }}
+          onChange={(_, v) => { setTitle(v || ''); setErrors(p => ({ ...p, title: '' })); setDirty(true); }}
           required
           errorMessage={errors.title}
           autoFocus
@@ -112,7 +137,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         <TextField
           label="Description"
           value={description}
-          onChange={(_, v) => setDescription(v || '')}
+          onChange={(_, v) => { setDescription(v || ''); setDirty(true); }}
           multiline
           rows={3}
           placeholder="What is this project about?"
@@ -122,40 +147,12 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
         {/* Color picker */}
         <div>
           <Label>Project Color</Label>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 6, alignItems: 'center' }}>
-            {PROJECT_COLORS.map(c => (
-              <div
-                key={c}
-                onClick={() => setColor(c)}
-                style={{
-                  width: 30, height: 30, borderRadius: '50%', background: c,
-                  cursor: 'pointer',
-                  border: color === c ? '3px solid #323130' : '3px solid transparent',
-                  outline: color === c ? `2px solid ${c}` : 'none',
-                  outlineOffset: 2, transition: 'all 0.15s', boxSizing: 'border-box',
-                }}
-              />
-            ))}
-            {/* Custom color swatch */}
-            <label
-              title="Pick a custom color"
-              style={{ position: 'relative', width: 30, height: 30, cursor: 'pointer', flexShrink: 0 }}
-            >
-              <div style={{
-                width: 30, height: 30, borderRadius: '50%',
-                background: !PROJECT_COLORS.includes(color) ? color : 'conic-gradient(red,yellow,lime,cyan,blue,magenta,red)',
-                border: !PROJECT_COLORS.includes(color) ? '3px solid #323130' : '2px solid #EDEBE9',
-                outline: !PROJECT_COLORS.includes(color) ? `2px solid ${color}` : 'none',
-                outlineOffset: 2, boxSizing: 'border-box',
-              }} />
-              <input
-                type="color"
-                value={color}
-                onChange={e => setColor(e.target.value)}
-                style={{ position: 'absolute', opacity: 0, width: 0, height: 0, pointerEvents: 'none' }}
-              />
-            </label>
-          </div>
+          <ColorSwatchPicker
+            colors={PROJECT_COLORS}
+            value={color}
+            onChange={c => { setColor(c); setDirty(true); }}
+            size={30}
+          />
         </div>
 
         {/* Status */}
@@ -163,7 +160,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
           label="Status"
           selectedKey={status}
           options={statusOptions}
-          onChange={(_, opt) => opt && setStatus(opt.key as ProjectStatus)}
+          onChange={(_, opt) => { if (opt) { setStatus(opt.key as ProjectStatus); setDirty(true); } }}
         />
 
         {/* Date range */}
@@ -173,7 +170,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
               label="Start Date"
               type="date"
               value={startDate}
-              onChange={(_, v) => setStartDate(v || '')}
+              onChange={(_, v) => { setStartDate(v || ''); setDirty(true); }}
             />
           </Stack.Item>
           <Stack.Item grow>
@@ -181,7 +178,7 @@ export const ProjectPanel: React.FC<IProjectPanelProps> = ({ isOpen, project, on
               label="Due Date"
               type="date"
               value={dueDate}
-              onChange={(_, v) => { setDueDate(v || ''); setErrors(p => ({ ...p, dueDate: '' })); }}
+              onChange={(_, v) => { setDueDate(v || ''); setErrors(p => ({ ...p, dueDate: '' })); setDirty(true); }}
               errorMessage={errors.dueDate}
             />
           </Stack.Item>

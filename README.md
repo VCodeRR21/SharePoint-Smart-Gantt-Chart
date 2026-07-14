@@ -24,8 +24,10 @@ A SharePoint Framework (SPFx) web part for project management with five views �
 - **Project management** — Each project gets its own SharePoint list with 15 pre-built columns (status, priority, dates, assignee, % complete, phase, milestones, dependencies, and more)
 - **Display settings** — Customize colors (including by health), header theme, week numbering, bar style, row height, and show/hide toggles including health badges
 - **Export** — Download tasks as Excel, export a full PowerPoint project report (cover, summary, Gantt chart, and recent activity), or save the Gantt as a high-resolution PNG
-- **Import** — Bring in tasks from Excel/CSV files (including MS Project exports) or directly from Microsoft Planner, with a column-mapping screen for non-standard headers; or create a brand new project directly from an import file via the project selector dropdown
+- **Import** — Bring in tasks from Excel/CSV files (including MS Project exports) or directly from Microsoft Planner, with a column-mapping screen for non-standard headers; or create a brand new project directly from an import file via the project selector dropdown. Dependencies (predecessors) are resolved to the correct tasks after import, whether referenced by row number or by title
 - **Autocomplete** — Phase and Assigned To fields suggest values already used in the project
+- **Concurrent-edit protection** — if two people save the same task or project at nearly the same time, the second save is rejected with a clear "changed by someone else" message instead of silently overwriting the first person's changes
+- **Keyboard and touch support** — List column headers, Kanban cards, and toolbar menus are fully keyboard-operable; Gantt bars can be dragged and resized with touch or pen input, not just a mouse
 
 ---
 
@@ -51,7 +53,7 @@ A SharePoint Framework (SPFx) web part for project management with five views �
 - Sticky task list on the left; scrollable SVG timeline on the right
 - Four zoom levels: Day, Week, Month, Quarter
 - Task bars color-coded by status, priority, phase, or health; progress overlay shows % complete
-- Drag a bar horizontally to move dates; drag the right edge to resize
+- Drag a bar horizontally to move dates; drag the right edge to resize — works with mouse, touch, or pen input
 - Dependency arrows drawn between tasks
 - Phase rows collapse/expand to group related tasks
 - Hover tooltip shows task name, dates, status, priority, assignee, % complete, and health indicator
@@ -405,7 +407,7 @@ src/
 | React | 17.0.1 | UI |
 | Fluent UI | 8.125.6 | Microsoft design system components |
 | PnPjs | 3.26.0 | SharePoint REST API client |
-| SheetJS (xlsx) | 0.18.5 | Excel/CSV file parsing and export |
+| SheetJS (xlsx) | 0.20.3 | Excel/CSV file parsing and export (pinned to the SheetJS CDN build — npm's last published version has unfixed CVEs) |
 | pptxgenjs | 4.0.1 | PowerPoint export |
 | date-fns | 2.30.0 | Date calculations for Gantt rendering and export |
 
@@ -437,7 +439,9 @@ All other configuration (projects, tasks, colors, display settings) is managed t
 
 **Portfolio view is slow to load** — Stats for all projects are fetched in parallel on first visit. For portfolios with 20+ projects, this may take several seconds. A loading spinner is displayed while fetching. Stats are cached until the next project or task change.
 
-**Display settings reset after a page reload** — This is expected behavior in the current version. Settings are session-only and reset on reload. See [Known Limitations](#known-limitations).
+**Display settings didn't stick after closing my browser** — Settings are saved to your browser's local storage, keyed to this specific web part on this specific page. Clearing browser data, using a private/incognito window, or viewing the page in a different browser will show the defaults instead of your saved settings.
+
+**Portfolio card shows "Stats unavailable"** — The web part couldn't load task statistics for that project, usually due to a permissions issue or a temporary network/throttling problem. Click **↻ Refresh** in the Portfolio header to retry; if it persists, confirm you still have access to that project's underlying SharePoint list.
 
 ---
 
@@ -445,8 +449,8 @@ All other configuration (projects, tasks, colors, display settings) is managed t
 
 - **MS Project Desktop (.mpp files)** — the binary `.mpp` format cannot be parsed in a browser. Use File → Save As → Excel in Project Desktop instead.
 - **Planner import** requires admin approval of Graph permissions (one-time setup).
-- **Dependencies** imported from Excel are stored as text and not auto-resolved to task IDs across imports.
-- **Display settings** are session-only and reset on page reload. Future work could persist them to the web part property bag.
+- **Display settings** persist to browser local storage per web part instance, not the web part property bag — they won't follow you to a different browser or carry over if local storage is cleared. Future work could persist them to the property bag instead.
+- **Gantt bars** cannot be moved or resized from the keyboard yet — dragging/resizing requires a mouse, touch, or pen. Use the task panel (reachable via the keyboard-accessible **Edit** button) to change dates instead.
 - The web part requires **Site Owner** permissions on the SharePoint site for the first project creation (list creation). Subsequent task operations work with Site Member permissions.
 - **Guest users** cannot create projects (list creation requires elevated permissions), but can fully manage tasks in existing projects. See [External / Guest User Access](#external--guest-user-access) for setup instructions.
 - **Portfolio view** loads task stats for all projects in parallel on first visit. For portfolios with 30+ projects this may take a few seconds; a spinner is shown while loading.

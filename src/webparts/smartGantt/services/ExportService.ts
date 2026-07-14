@@ -19,6 +19,11 @@ function safeFileName(name: string): string {
 
 // ─── Excel export ─────────────────────────────────────────────────────────────
 
+const TASK_EXPORT_HEADERS = [
+  'Task Name', 'Phase', 'Start Date', 'Due Date', 'Status', 'Priority',
+  'Assigned To', 'Assigned To (Email)', '% Complete', 'Is Milestone', 'Description', 'Notes',
+];
+
 export function exportTasksToExcel(project: IProject, tasks: ITask[]): void {
   const fmt = (d: string): string => formatDateOnly(d, 'MM/dd/yyyy', '');
 
@@ -37,10 +42,14 @@ export function exportTasksToExcel(project: IProject, tasks: ITask[]): void {
     'Notes': t.notes,
   }));
 
-  const ws = XLSX.utils.json_to_sheet(rows);
+  // json_to_sheet([]) produces a sheet with no header row at all — an
+  // empty project would otherwise export a completely blank file.
+  const ws = rows.length > 0
+    ? XLSX.utils.json_to_sheet(rows)
+    : XLSX.utils.aoa_to_sheet([TASK_EXPORT_HEADERS]);
 
   // Auto-width
-  const headers = Object.keys(rows[0] || {});
+  const headers = rows.length > 0 ? Object.keys(rows[0]) : TASK_EXPORT_HEADERS;
   ws['!cols'] = headers.map(h => ({
     wch: Math.max(h.length + 2, ...rows.map(r => String((r as Record<string, unknown>)[h] ?? '').length + 1)),
   }));
@@ -359,9 +368,12 @@ export function renderGanttSVG(
 
 export function downloadPNG(svgString: string, filename: string, scale: number = 2): Promise<void> {
   filename = safeFileName(filename);
-  return svgToCanvas(svgString, scale).then(canvas => new Promise<void>((resolve) => {
+  return svgToCanvas(svgString, scale).then(canvas => new Promise<void>((resolve, reject) => {
     canvas.toBlob(pngBlob => {
-      if (!pngBlob) { resolve(); return; }
+      if (!pngBlob) {
+        reject(new Error('Could not generate the image — the chart may be too large to export as an image.'));
+        return;
+      }
       const pngUrl = URL.createObjectURL(pngBlob);
       const a = document.createElement('a');
       a.href = pngUrl;
@@ -377,6 +389,11 @@ export function downloadPNG(svgString: string, filename: string, scale: number =
 
 // ─── PowerPoint export ────────────────────────────────────────────────────────
 
+// Browsers cap canvas dimensions around 16,384px (varies by browser/GPU); a
+// multi-year project at the default scale can exceed that (e.g. ~2,900 days
+// x 3px x 2 scale ~= 17,400px), silently producing a null/blank image.
+const MAX_CANVAS_DIMENSION = 16000;
+
 // Shared SVG→canvas helper used by both downloadPNG and svgToPngDataUrl.
 function svgToCanvas(svgString: string, scale: number): Promise<HTMLCanvasElement> {
   return new Promise((resolve, reject) => {
@@ -384,12 +401,17 @@ function svgToCanvas(svgString: string, scale: number): Promise<HTMLCanvasElemen
     const svgUrl = URL.createObjectURL(blob);
     const img = new Image();
     img.onload = (): void => {
+      const effectiveScale = Math.min(scale, MAX_CANVAS_DIMENSION / img.width, MAX_CANVAS_DIMENSION / img.height);
       const canvas = document.createElement('canvas');
-      canvas.width = img.width * scale;
-      canvas.height = img.height * scale;
+      canvas.width = img.width * effectiveScale;
+      canvas.height = img.height * effectiveScale;
       const ctx = canvas.getContext('2d');
-      if (!ctx) { URL.revokeObjectURL(svgUrl); resolve(canvas); return; }
-      ctx.scale(scale, scale);
+      if (!ctx) {
+        URL.revokeObjectURL(svgUrl);
+        reject(new Error('Could not create a drawing context for the export.'));
+        return;
+      }
+      ctx.scale(effectiveScale, effectiveScale);
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, img.width, img.height);
       ctx.drawImage(img, 0, 0);
@@ -821,18 +843,19 @@ export function exportPortfolioToExcel(
 
   const rows = projects.map(p => {
     const s = statsMap?.get(p.id);
+    const ok = s && !s.statsError;
     return {
       'Project':     p.title,
       'Status':      p.status,
-      'Health':      s ? portfolioHealthLabel(s.health) : '—',
-      'Total Tasks': s?.totalTasks ?? '—',
-      'Completed':   s?.completedCount ?? '—',
-      'In Progress': s?.inProgressCount ?? '—',
-      'At Risk':     s?.atRiskCount ?? '—',
-      'Overdue':     s?.overdueCount ?? '—',
-      '% Done':      s != null ? `${s.overallPct}%` : '—',
-      'Start':       fmt(p.startDate || s?.earliestStart || ''),
-      'Due':         fmt(p.dueDate   || s?.latestDue    || ''),
+      'Health':      s ? (s.statsError ? 'Unavailable' : portfolioHealthLabel(s.health)) : '—',
+      'Total Tasks': ok ? s!.totalTasks : '—',
+      'Completed':   ok ? s!.completedCount : '—',
+      'In Progress': ok ? s!.inProgressCount : '—',
+      'At Risk':     ok ? s!.atRiskCount : '—',
+      'Overdue':     ok ? s!.overdueCount : '—',
+      '% Done':      ok ? `${s!.overallPct}%` : '—',
+      'Start':       fmt(p.startDate || (ok ? s!.earliestStart : '') || ''),
+      'Due':         fmt(p.dueDate   || (ok ? s!.latestDue    : '') || ''),
       'Description': p.description,
     };
   });
@@ -859,7 +882,7 @@ export async function exportPortfolioToPowerPoint(
   // Aggregate health counts
   const healthCounts = { 'on-track': 0, 'at-risk': 0, overdue: 0, complete: 0 };
   if (statsMap) {
-    statsMap.forEach(s => { if (s.health in healthCounts) healthCounts[s.health as keyof typeof healthCounts]++; });
+    statsMap.forEach(s => { if (!s.statsError && s.health in healthCounts) healthCounts[s.health as keyof typeof healthCounts]++; });
   }
 
   const pptx = new PptxGenJS();
@@ -935,8 +958,9 @@ export async function exportPortfolioToPowerPoint(
 
   const dataRows = projects.map(p => {
     const s = statsMap?.get(p.id);
-    const hLabel = s ? portfolioHealthLabel(s.health) : '—';
-    const hHex   = s ? portfolioHealthHex(s.health)   : '323130';
+    const ok = s && !s.statsError;
+    const hLabel = s ? (s.statsError ? 'Unavailable' : portfolioHealthLabel(s.health)) : '—';
+    const hHex   = ok ? portfolioHealthHex(s!.health) : '323130';
     const rowBg  = 'FFFFFF';
 
     const cell = (txt: string, opts: object = {}): object => ({
@@ -948,13 +972,13 @@ export async function exportPortfolioToPowerPoint(
       cell(p.title, { align: 'left' as const, bold: true }),
       cell(p.status),
       cell(hLabel, { color: hHex, bold: true }),
-      cell(s ? String(s.totalTasks)    : '—'),
-      cell(s ? String(s.completedCount): '—', { color: '107C10' }),
-      cell(s ? String(s.inProgressCount):'—', { color: '0078D4' }),
-      cell(s ? String(s.atRiskCount)   : '—', { color: 'CA5010' }),
-      cell(s ? String(s.overdueCount)  : '—', { color: 'D13438' }),
-      cell(s ? `${s.overallPct}%`      : '—'),
-      cell(fmt(p.dueDate || s?.latestDue || '')),
+      cell(ok ? String(s!.totalTasks)    : '—'),
+      cell(ok ? String(s!.completedCount): '—', { color: '107C10' }),
+      cell(ok ? String(s!.inProgressCount):'—', { color: '0078D4' }),
+      cell(ok ? String(s!.atRiskCount)   : '—', { color: 'CA5010' }),
+      cell(ok ? String(s!.overdueCount)  : '—', { color: 'D13438' }),
+      cell(ok ? `${s!.overallPct}%`      : '—'),
+      cell(fmt(p.dueDate || (ok ? s!.latestDue : '') || '')),
     ];
   });
 

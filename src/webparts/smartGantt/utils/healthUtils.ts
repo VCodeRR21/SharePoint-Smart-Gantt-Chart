@@ -128,13 +128,16 @@ export function computeCriticalPath(tasks: ITask[]): Set<number> {
   return path;
 }
 
-/** True when a task is In Progress/Completed but a dependency is not yet complete. */
-export function hasDependencyViolation(task: ITask, allTasks: ITask[]): boolean {
+/**
+ * True when a task is In Progress/Completed but a dependency is not yet complete.
+ * Takes a prebuilt id→task map (rather than the raw task array) so callers
+ * checking every task in a list build the lookup once instead of once per task.
+ */
+export function hasDependencyViolation(task: ITask, tasksById: Map<number, ITask>): boolean {
   if (task.status === 'Not Started' || task.status === 'Cancelled') return false;
   if (!task.dependencies.length) return false;
-  const byId = new Map(allTasks.map(t => [t.id, t]));
   return task.dependencies.some(depId => {
-    const dep = byId.get(depId);
+    const dep = tasksById.get(depId);
     return !!dep && dep.status !== 'Completed' && dep.status !== 'Cancelled';
   });
 }

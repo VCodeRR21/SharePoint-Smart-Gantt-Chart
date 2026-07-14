@@ -8,9 +8,9 @@ import { WebPartContext } from '@microsoft/sp-webpart-base';
 import {
   IImportSource, ColumnMapping, IPlannerPlan,
   parseExcelFile, fetchPlannerPlans, fetchPlannerTasks,
-  applyMapping, batchImport, resolveDependencies, IBatchImportResult,
+  applyMapping, filterMappedRows, batchImport, resolveDependencies, IBatchImportResult,
 } from '../../services/ImportService';
-import { IProject, PROJECT_COLORS, PROJECT_STATUS_OPTIONS, ProjectStatus } from '../../models';
+import { IProject, ITask, PROJECT_COLORS, PROJECT_STATUS_OPTIONS, ProjectStatus } from '../../models';
 import { SharePointService } from '../../services/SharePointService';
 import { ColumnMapper } from './ColumnMapper';
 import styles from './ImportPanel.module.scss';
@@ -22,6 +22,9 @@ interface IImportPanelProps {
   isOpen: boolean;
   /** Omit to create a new project from the imported file. */
   project?: IProject;
+  /** Existing tasks in `project` (append mode only) — used to keep imported rows'
+   *  sort order after the current tasks instead of colliding with them. */
+  existingTasks?: ITask[];
   spService: SharePointService;
   context: WebPartContext;
   onDismiss: () => void;
@@ -31,7 +34,7 @@ interface IImportPanelProps {
 }
 
 export const ImportPanel: React.FC<IImportPanelProps> = ({
-  isOpen, project, spService, context, onDismiss, onImportComplete,
+  isOpen, project, existingTasks, spService, context, onDismiss, onImportComplete,
 }) => {
   const createMode = !project;
 
@@ -51,6 +54,7 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
   const [plansError, setPlansError] = React.useState('');
   const [selectedPlan, setSelectedPlan] = React.useState<IPlannerPlan | null>(null);
   const [planTasksLoading, setPlanTasksLoading] = React.useState(false);
+  const latestPlanIdRef = React.useRef<string | null>(null);
 
   // Import progress
   const [importProgress, setImportProgress] = React.useState({ done: 0, total: 0 });
@@ -140,18 +144,31 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
   };
 
   const handlePlanSelect = async (plan: IPlannerPlan): Promise<void> => {
+    latestPlanIdRef.current = plan.id;
     setSelectedPlan(plan);
     setPlanTasksLoading(true);
     try {
       const source = await fetchPlannerTasks(context, plan.id, plan.title);
+      // A later click on a different plan may have resolved first; don't let
+      // this (now-stale) response overwrite it.
+      if (latestPlanIdRef.current !== plan.id) return;
       setImportSource(source);
       setMapping(source.autoMapping);
       if (createMode) setNewProjectTitle(plan.title);
     } catch (e: any) {
+      if (latestPlanIdRef.current !== plan.id) return;
       setPlansError(e.message || 'Could not load tasks from this plan.');
     } finally {
-      setPlanTasksLoading(false);
+      if (latestPlanIdRef.current === plan.id) setPlanTasksLoading(false);
     }
+  };
+
+  const selectSource = (type: 'excel' | 'planner'): void => {
+    setSourceType(type);
+    setImportSource(null);
+    setMapping({});
+    setSelectedPlan(null);
+    latestPlanIdRef.current = null;
   };
 
   const canProceedFromSource = (): boolean => {
@@ -190,6 +207,9 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
 
   const startImport = async (): Promise<void> => {
     if (!importSource) return;
+    // Keep the raw rows used for dependency resolution in lockstep with the
+    // task array batchImport() creates from, so createdIds line up positionally.
+    const filteredRows = filterMappedRows(importSource.rows, mapping);
     const tasks = applyMapping(importSource.rows, mapping);
     if (tasks.length === 0) return;
 
@@ -217,6 +237,7 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
           succeeded: 0,
           failed: tasks.length,
           errors: [`Could not create project: ${(e as Error).message || 'unknown error'}`],
+          createdIds: [],
         });
         setStep('done');
         return;
@@ -229,19 +250,34 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
 
     const offset = createMode ? 1 : 0;
     const totalSlots = tasks.length + offset;
+    // Append after any tasks already in the project, so imported rows don't
+    // interleave with the existing manual sort order.
+    const sortOrderBase = (createMode || !existingTasks || existingTasks.length === 0)
+      ? 0
+      : Math.max(...existingTasks.map(t => t.sortOrder)) + 1;
 
     const result = await batchImport(
       spService,
       targetProject.listName,
       tasks,
+      sortOrderBase,
       (done, total) => setImportProgress({ done: done + offset, total: total + offset })
     );
     setImportProgress({ done: totalSlots, total: totalSlots });
 
-    // Resolve name-based dependency references (e.g. "Task Title A, Task Title B")
-    // to SharePoint numeric IDs now that all tasks have been created.
-    if (importSource && Object.values(mapping).includes('dependencies')) {
-      await resolveDependencies(spService, targetProject.listName, importSource.rows, mapping);
+    // Resolve name-based / row-number dependency references now that all
+    // tasks have been created. Tasks are already imported at this point, so
+    // a failure here is reported as a warning rather than stranding the
+    // wizard on the importing step.
+    if (Object.values(mapping).includes('dependencies')) {
+      try {
+        const depResult = await resolveDependencies(
+          spService, targetProject.listName, filteredRows, mapping, result.createdIds
+        );
+        if (depResult.warnings.length > 0) result.errors.push(...depResult.warnings);
+      } catch (e) {
+        result.errors.push(`Could not link dependencies: ${e instanceof Error ? e.message : 'unknown error'}`);
+      }
     }
 
     setImportResult(result);
@@ -263,7 +299,7 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
       <div className={styles.sourceGrid}>
         <div
           className={`${styles.sourceCard} ${sourceType === 'excel' ? styles.selected : ''}`}
-          onClick={() => { setSourceType('excel'); setImportSource(null); }}
+          onClick={() => selectSource('excel')}
         >
           <div className={styles.sourceIcon}>📊</div>
           <div className={styles.sourceTitle}>Excel / CSV</div>
@@ -273,7 +309,7 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
         </div>
         <div
           className={`${styles.sourceCard} ${sourceType === 'planner' ? styles.selected : ''}`}
-          onClick={() => setSourceType('planner')}
+          onClick={() => selectSource('planner')}
         >
           <div className={styles.sourceIcon}>📋</div>
           <div className={styles.sourceTitle}>Microsoft Planner</div>
@@ -483,21 +519,28 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
     if (!importResult) return null;
     const hasErrors = importResult.failed > 0;
     const targetProject = createdProject ?? project;
+    // Project creation itself failed (create mode only) — nothing was
+    // imported, so don't claim "0 tasks added to <blank project>".
+    const projectCreateFailed = createMode && !createdProject;
     return (
       <div className={styles.resultSection}>
         <div className={`${styles.resultCard} ${hasErrors ? styles.partial : styles.success}`}>
-          <div className={styles.resultIcon}>{hasErrors ? '⚠️' : '🎉'}</div>
+          <div className={styles.resultIcon}>{projectCreateFailed ? '❌' : hasErrors ? '⚠️' : '🎉'}</div>
           <div className={styles.resultInfo}>
             <div className={styles.resultTitle}>
-              {hasErrors
+              {projectCreateFailed
+                ? 'Could not create project'
+                : hasErrors
                 ? `Import completed with ${importResult.failed} error${importResult.failed !== 1 ? 's' : ''}`
                 : createMode ? 'Project created successfully!' : 'Import successful!'}
             </div>
-            <div className={styles.resultDetail}>
-              {importResult.succeeded} task{importResult.succeeded !== 1 ? 's' : ''} added to{' '}
-              <strong>{targetProject?.title}</strong>
-              {hasErrors && ` · ${importResult.failed} failed`}
-            </div>
+            {!projectCreateFailed && (
+              <div className={styles.resultDetail}>
+                {importResult.succeeded} task{importResult.succeeded !== 1 ? 's' : ''} added to{' '}
+                <strong>{targetProject?.title}</strong>
+                {hasErrors && ` · ${importResult.failed} failed`}
+              </div>
+            )}
           </div>
         </div>
 
@@ -523,6 +566,9 @@ export const ImportPanel: React.FC<IImportPanelProps> = ({
     if (step === 'importing') return <></>;
 
     if (step === 'done') {
+      if (createMode && !createdProject) {
+        return <DefaultButton text="Close" onClick={onDismiss} />;
+      }
       return (
         <Stack horizontal tokens={{ childrenGap: 10 }}>
           <PrimaryButton

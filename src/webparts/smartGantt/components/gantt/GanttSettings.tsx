@@ -84,15 +84,18 @@ export const GanttSettings: React.FC<IGanttSettingsProps> = ({
           <div className={styles.sectionTitle}>Header Color</div>
           <div className={styles.themeGrid}>
             {themes.map(t => (
-              <div
+              <button
                 key={t.id}
+                type="button"
                 className={`${styles.themeSwatch} ${settings.headerTheme === t.id ? styles.selected : ''} ${t.id === 'light' ? styles.light : ''}`}
                 style={{ background: HEADER_THEME_COLORS[t.id].bg }}
                 title={t.label}
+                aria-label={t.label}
+                aria-pressed={settings.headerTheme === t.id}
                 onClick={() => set('headerTheme', t.id)}
               >
                 {t.label[0]}
-              </div>
+              </button>
             ))}
           </div>
         </div>
@@ -163,12 +166,12 @@ export const GanttSettings: React.FC<IGanttSettingsProps> = ({
           {([['showWeekends', 'Weekend shading']] as const).map(([key, label]) => (
             <div key={key} className={styles.toggleRow}>
               <span className={styles.toggleLabel}>{label}</span>
-              <Toggle checked={settings[key]} onChange={(_, v) => set(key, !!v)} styles={{ root: { margin: 0 } }} />
+              <Toggle checked={settings[key]} onChange={(_, v) => set(key, !!v)} ariaLabel={label} styles={{ root: { margin: 0 } }} />
             </div>
           ))}
           <div className={styles.toggleRow}>
             <span className={styles.toggleLabel}>Dependency arrows</span>
-            <Toggle checked={settings.showDependencies} onChange={(_, v) => set('showDependencies', !!v)} styles={{ root: { margin: 0 } }} />
+            <Toggle checked={settings.showDependencies} onChange={(_, v) => set('showDependencies', !!v)} ariaLabel="Dependency arrows" styles={{ root: { margin: 0 } }} />
           </div>
           {settings.showDependencies && (
             <>
@@ -178,7 +181,7 @@ export const GanttSettings: React.FC<IGanttSettingsProps> = ({
               ] as const).map(([key, label]) => (
                 <div key={key} className={styles.toggleRow} style={{ paddingLeft: 20 }}>
                   <span className={styles.toggleLabel} style={{ color: '#605E5C' }}>{label}</span>
-                  <Toggle checked={settings[key]} onChange={(_, v) => set(key, !!v)} styles={{ root: { margin: 0 } }} />
+                  <Toggle checked={settings[key]} onChange={(_, v) => set(key, !!v)} ariaLabel={label} styles={{ root: { margin: 0 } }} />
                 </div>
               ))}
             </>
@@ -191,7 +194,7 @@ export const GanttSettings: React.FC<IGanttSettingsProps> = ({
           ] as const).map(([key, label]) => (
             <div key={key} className={styles.toggleRow}>
               <span className={styles.toggleLabel}>{label}</span>
-              <Toggle checked={settings[key] as boolean} onChange={(_, v) => set(key, !!v)} styles={{ root: { margin: 0 } }} />
+              <Toggle checked={settings[key] as boolean} onChange={(_, v) => set(key, !!v)} ariaLabel={label} styles={{ root: { margin: 0 } }} />
             </div>
           ))}
         </div>

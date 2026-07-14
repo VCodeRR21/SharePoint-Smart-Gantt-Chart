@@ -60,6 +60,13 @@ export interface IBatchImportResult {
   succeeded: number;
   failed: number;
   errors: string[];
+  /** SharePoint item id created for each input task, in the same order (null where creation failed). */
+  createdIds: Array<number | null>;
+}
+
+export interface IResolveDependenciesResult {
+  resolved: number;
+  warnings: string[];
 }
 
 // ─── Auto-map aliases ─────────────────────────────────────────────────────────
@@ -131,6 +138,17 @@ function parseExcelDate(value: string | number | null | undefined): string {
   // normalizer, which handles UTC-midnight and legacy local-midnight values.
   if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
     return toDateOnly(str);
+  }
+
+  // Excel serial date arriving as a stringified number (sheet_to_json with
+  // raw: true stringifies every cell before this function sees it). Guard
+  // the range so a plain numeric ID/row-number column isn't misread as a date.
+  if (/^\d+(\.\d+)?$/.test(str)) {
+    const serial = parseFloat(str);
+    if (serial > 59 && serial < 200000) {
+      const date = XLSX.SSF.parse_date_code(serial);
+      if (date) return ymd(date.y, date.m, date.d);
+    }
   }
 
   // MM/DD/YYYY or M/D/YYYY — interpret as a calendar day directly
@@ -211,6 +229,12 @@ export async function parseExcelFile(file: File): Promise<IImportSource> {
         });
 
         const autoMapping = autoMap(headers);
+        // Blank/merged header cells come back from SheetJS as '__EMPTY',
+        // '__EMPTY_1', etc. — auto-skip them so they don't clutter the
+        // mapping UI as columns needing review.
+        headers.forEach(h => {
+          if (/^__EMPTY(_\d+)?$/.test(h)) autoMapping[h] = 'skip';
+        });
         resolve({
           type: 'excel',
           fileName: file.name,
@@ -219,8 +243,9 @@ export async function parseExcelFile(file: File): Promise<IImportSource> {
           autoMapping,
           needsMapping: mappingNeedsReview(autoMapping),
         });
-      } catch {
-        reject(new Error('Could not read the file. Make sure it is a valid .xlsx, .xls, or .csv file.'));
+      } catch (e) {
+        const detail = e instanceof Error ? `: ${e.message}` : '';
+        reject(new Error(`Could not read the file. Make sure it is a valid .xlsx, .xls, or .csv file${detail}.`));
       }
     };
     reader.onerror = () => reject(new Error('File read error.'));
@@ -234,6 +259,24 @@ export function applyMapping(
   rows: Record<string, string>[],
   mapping: ColumnMapping
 ): Partial<ITask>[] {
+  // A percent-formatted Excel cell ("50%") arrives via raw:true as the bare
+  // fraction 0.5 with no literal '%' sign. Detect that once for the whole
+  // mapped column (rather than per cell, where 0.5 could mean "half a
+  // percent") and scale up if every non-empty, non-'%'-suffixed value is a
+  // fraction in (0, 1].
+  const percentCol = Object.keys(mapping).find(k => mapping[k] === 'percentComplete');
+  let percentScale = 1;
+  if (percentCol) {
+    const values = rows
+      .map(r => (r[percentCol] ?? '').trim())
+      .filter(v => v !== '' && v.indexOf('%') === -1)
+      .map(v => parseFloat(v))
+      .filter(v => !isNaN(v));
+    if (values.length > 0 && values.every(v => v > 0 && v <= 1)) {
+      percentScale = 100;
+    }
+  }
+
   return rows
     .map(row => {
       const task: Partial<ITask> = {};
@@ -250,21 +293,18 @@ export function applyMapping(
           case 'assignedToEmail': task.assignedToEmail = raw; break;
           case 'percentComplete': {
             const n = parseFloat(raw.replace('%', ''));
-            if (!isNaN(n)) task.percentComplete = Math.min(100, Math.max(0, n));
+            if (!isNaN(n)) task.percentComplete = Math.min(100, Math.max(0, n * percentScale));
             break;
           }
           case 'phase': task.phase = raw; break;
           case 'description': task.description = raw; break;
           case 'notes': task.notes = raw; break;
           case 'isMilestone': task.isMilestone = raw ? normalizeBoolean(raw) : false; break;
-          case 'dependencies': {
-            // If the value is all numeric IDs (e.g. MS Project row numbers), apply now.
-            // Name-based deps (e.g. "Task Title 1, Task Title 2") are resolved
-            // post-import by resolveDependencies() once SharePoint IDs are known.
-            const ids = raw.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0);
-            if (ids.length > 0) task.dependencies = ids;
+          case 'dependencies':
+            // Not resolved here — SharePoint IDs don't exist until after
+            // create. resolveDependencies() does a post-import pass over the
+            // raw rows once all tasks have been created.
             break;
-          }
         }
       });
       return task;
@@ -288,18 +328,32 @@ async function getGraphClient(context: WebPartContext): Promise<IGraphClient> {
   return (context as any).msGraphClientFactory.getClient('3') as IGraphClient;
 }
 
+// Graph pages results regardless of $top (e.g. Planner tasks page at ~400
+// per response); follow @odata.nextLink until exhausted so large collections
+// aren't silently truncated.
+async function fetchAllPages(client: IGraphClient, first: Promise<{ value?: any[]; '@odata.nextLink'?: string }>): Promise<any[]> {
+  const results: any[] = [];
+  let resp = await first;
+  results.push(...(resp.value || []));
+  let nextLink = resp['@odata.nextLink'];
+  while (nextLink) {
+    resp = await client.api(nextLink).get();
+    results.push(...(resp.value || []));
+    nextLink = resp['@odata.nextLink'];
+  }
+  return results;
+}
+
 export async function fetchPlannerPlans(context: WebPartContext): Promise<IPlannerPlan[]> {
   const graph = await getGraphClient(context);
 
   // Get the user's M365 groups
   let groups: any[] = [];
   try {
-    const resp = await graph
-      .api('/me/memberOf/microsoft.graph.group')
-      .select('id,displayName,groupTypes')
-      .top(50)
-      .get();
-    groups = resp.value || [];
+    groups = await fetchAllPages(
+      graph,
+      graph.api('/me/memberOf/microsoft.graph.group').select('id,displayName,groupTypes').top(50).get()
+    );
   } catch {
     return [];
   }
@@ -339,14 +393,12 @@ export async function fetchPlannerTasks(
 ): Promise<IImportSource> {
   const graph = await getGraphClient(context);
 
-  // Fetch tasks and buckets in parallel
-  const [tasksResp, bucketsResp] = await Promise.all([
-    graph.api(`/planner/plans/${planId}/tasks`).top(500).get(),
-    graph.api(`/planner/plans/${planId}/buckets`).get(),
+  // Fetch tasks and buckets in parallel, paging both to completion.
+  const [plannerTasks, buckets] = await Promise.all([
+    fetchAllPages(graph, graph.api(`/planner/plans/${planId}/tasks`).top(500).get()),
+    fetchAllPages(graph, graph.api(`/planner/plans/${planId}/buckets`).get()),
   ]);
 
-  const plannerTasks: any[] = tasksResp.value || [];
-  const buckets: any[] = bucketsResp.value || [];
   const bucketMap = new Map<string, string>(buckets.map((b: any) => [b.id, b.name]));
 
   // Collect unique user IDs from assignments to resolve names
@@ -408,82 +460,117 @@ export async function fetchPlannerTasks(
   };
 }
 
+// ─── Row filtering ────────────────────────────────────────────────────────────
+
+// The same title-based filter applyMapping() uses to drop blank rows, exposed
+// so callers can keep a raw-row array in lockstep with the filtered task
+// array (needed to resolve dependencies positionally — see resolveDependencies).
+export function filterMappedRows(rows: Record<string, string>[], mapping: ColumnMapping): Record<string, string>[] {
+  const titleCol = Object.keys(mapping).find(k => mapping[k] === 'title');
+  if (!titleCol) return [];
+  return rows.filter(r => !!(r[titleCol] ?? '').trim());
+}
+
 // ─── Batch import ─────────────────────────────────────────────────────────────
 
 export async function batchImport(
   spService: SharePointService,
   listName: string,
   tasks: Partial<ITask>[],
+  sortOrderBase = 0,
   onProgress?: (done: number, total: number) => void
 ): Promise<IBatchImportResult> {
-  const result: IBatchImportResult = { succeeded: 0, failed: 0, errors: [] };
   const total = tasks.length;
+  const prepared = tasks.map((t, i) => ({
+    ...t,
+    status: t.status || 'Not Started',
+    priority: t.priority || 'Medium',
+    percentComplete: t.percentComplete ?? 0,
+    sortOrder: sortOrderBase + i,
+  }));
 
-  for (let i = 0; i < tasks.length; i++) {
-    const task = {
-      ...tasks[i],
-      status: tasks[i].status || 'Not Started',
-      priority: tasks[i].priority || 'Medium',
-      percentComplete: tasks[i].percentComplete ?? 0,
-      sortOrder: i,
-    };
-    try {
-      await spService.createTask(listName, task);
-      result.succeeded++;
-    } catch (err: any) {
-      result.failed++;
-      result.errors.push(`Row ${i + 1} ("${task.title}"): ${err?.message || 'Unknown error'}`);
-    }
-    if (onProgress) onProgress(i + 1, total);
+  const CHUNK_SIZE = 50;
+  const createdIds: Array<number | null> = new Array(total).fill(null);
+  const errors: string[] = [];
+  let succeeded = 0;
+  let failed = 0;
+
+  for (let start = 0; start < total; start += CHUNK_SIZE) {
+    const chunk = prepared.slice(start, start + CHUNK_SIZE);
+    const chunkResults = await spService.createTasksBatch(listName, chunk);
+    chunkResults.forEach((r, i) => {
+      const idx = start + i;
+      if (r.id !== null) {
+        createdIds[idx] = r.id;
+        succeeded++;
+      } else {
+        failed++;
+        errors.push(`Row ${idx + 1} ("${chunk[i].title}"): ${r.error || 'Unknown error'}`);
+      }
+    });
+    if (onProgress) onProgress(Math.min(start + CHUNK_SIZE, total), total);
   }
 
-  return result;
+  return { succeeded, failed, errors, createdIds };
 }
 
 // ─── Post-import dependency resolution ───────────────────────────────────────
 //
 // Dependencies stored in Excel as task names (e.g. "Design Review, UX Wireframes")
-// can't be converted to SharePoint IDs at mapping time because the IDs don't exist
-// yet.  Call this after batchImport() to do a second pass: fetch all newly-created
-// tasks, build a title→id map, and update each task's Dependencies field.
+// or MS Project-style row numbers can't be converted to SharePoint IDs at mapping
+// time because the IDs don't exist yet. Call this after batchImport() with the
+// same (filtered, aligned) rows and the createdIds it returned, to do a second
+// pass wiring up each task's Dependencies field.
+//
+// `rows` MUST be the array returned by filterMappedRows() for the same mapping
+// used to build the tasks passed to batchImport() — its order must match
+// createdIds exactly, since "row number" dependencies and title lookups are
+// both resolved positionally against createdIds rather than by re-fetching
+// and re-matching titles from SharePoint (which breaks on duplicate titles).
 
 export async function resolveDependencies(
   spService: SharePointService,
   listName: string,
   rows: Record<string, string>[],
-  mapping: ColumnMapping
-): Promise<void> {
+  mapping: ColumnMapping,
+  createdIds: Array<number | null>
+): Promise<IResolveDependenciesResult> {
+  const warnings: string[] = [];
   const depCol = Object.keys(mapping).find(k => mapping[k] === 'dependencies');
   const titleCol = Object.keys(mapping).find(k => mapping[k] === 'title');
-  if (!depCol || !titleCol) return;
+  if (!depCol || !titleCol) return { resolved: 0, warnings };
 
-  const rowsWithDeps = rows.filter(r => r[depCol]?.trim());
-  if (rowsWithDeps.length === 0) return;
-
-  const allTasks = await spService.getProjectTasks(listName);
-
-  // Build a case-insensitive title → SP id map
-  const titleToId = new Map<string, number>();
-  allTasks.forEach(t => titleToId.set(t.title.toLowerCase().trim(), t.id));
-
-  // Also build a 1-based row-number → SP id map so MS Project-style numeric
-  // predecessor columns ("3", "5") resolve correctly.
+  // 1-based row-number → SP id, so MS Project-style numeric predecessor
+  // columns ("3", "5") resolve to the task actually created for that row.
   const rowToId = new Map<number, number>();
+  rows.forEach((_row, idx) => {
+    const id = createdIds[idx];
+    if (id !== null && id !== undefined) rowToId.set(idx + 1, id);
+  });
+
+  // Case-insensitive title → SP id, tracking titles that appear more than
+  // once so dependencies referencing them are skipped (with a warning)
+  // rather than silently wired to whichever same-titled task happened last.
+  const titleToId = new Map<string, number>();
+  const ambiguousTitles = new Set<string>();
   rows.forEach((row, idx) => {
+    const id = createdIds[idx];
+    if (id === null || id === undefined) return;
     const title = (row[titleCol] ?? '').toLowerCase().trim();
-    const id = titleToId.get(title);
-    if (id !== undefined) rowToId.set(idx + 1, id);
+    if (!title) return;
+    if (titleToId.has(title)) {
+      ambiguousTitles.add(title);
+    } else {
+      titleToId.set(title, id);
+    }
   });
 
   const updates: Array<{ taskId: number; deps: number[] }> = [];
 
-  rows.forEach(row => {
-    const rawTitle = (row[titleCol] ?? '').trim();
+  rows.forEach((row, idx) => {
+    const taskId = createdIds[idx];
     const rawDeps = (row[depCol] ?? '').trim();
-    if (!rawTitle || !rawDeps) return;
-
-    const taskId = titleToId.get(rawTitle.toLowerCase());
-    if (taskId === undefined) return;
+    if (taskId === null || taskId === undefined || !rawDeps) return;
 
     const depIds: number[] = [];
     rawDeps.split(',').forEach(part => {
@@ -499,18 +586,43 @@ export async function resolveDependencies(
       }
 
       // Otherwise match by task title (case-insensitive)
-      const id = titleToId.get(name.toLowerCase());
+      const key = name.toLowerCase();
+      if (ambiguousTitles.has(key)) {
+        warnings.push(`Dependency "${name}" matches more than one task title — skipped.`);
+        return;
+      }
+      const id = titleToId.get(key);
       if (id !== undefined) depIds.push(id);
     });
 
     if (depIds.length > 0) updates.push({ taskId, deps: depIds });
   });
 
-  if (updates.length === 0) return;
+  if (updates.length === 0) return { resolved: 0, warnings };
 
-  await Promise.all(
-    updates.map(({ taskId, deps }) =>
-      spService.updateTask(listName, taskId, { dependencies: deps })
-    )
-  );
+  // Promise.allSettled isn't available at this project's target lib — a
+  // per-item catch gives the same "don't let one failure abort the batch"
+  // behavior without it.
+  interface IUpdateOutcome { error: string | null; }
+  const CHUNK_SIZE = 10;
+  let resolved = 0;
+  for (let start = 0; start < updates.length; start += CHUNK_SIZE) {
+    const chunk = updates.slice(start, start + CHUNK_SIZE);
+    const results: IUpdateOutcome[] = await Promise.all(
+      chunk.map(({ taskId, deps }): Promise<IUpdateOutcome> =>
+        spService.updateTask(listName, taskId, { dependencies: deps })
+          .then((): IUpdateOutcome => ({ error: null }))
+          .catch((e: unknown): IUpdateOutcome => ({ error: e instanceof Error ? e.message : String(e) }))
+      )
+    );
+    results.forEach((r, i) => {
+      if (r.error === null) {
+        resolved++;
+      } else {
+        warnings.push(`Could not link dependencies for task ${chunk[i].taskId}: ${r.error}`);
+      }
+    });
+  }
+
+  return { resolved, warnings };
 }

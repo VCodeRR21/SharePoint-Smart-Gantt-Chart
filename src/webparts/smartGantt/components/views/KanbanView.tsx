@@ -4,7 +4,8 @@ import {
   STATUS_COLORS, STATUS_LIGHT_COLORS, PRIORITY_COLORS,
 } from '../../models';
 import { computeTaskHealth } from '../../utils/healthUtils';
-import { parseDateOnly, formatDateOnly, todayLocalMidnight } from '../../utils/dateUtils';
+import { formatDateOnly } from '../../utils/dateUtils';
+import { isOverdue, initials, stringToColor } from '../../utils/taskDisplayUtils';
 import { HealthBadge } from '../common/HealthBadge';
 import styles from './KanbanView.module.scss';
 
@@ -21,32 +22,21 @@ interface IKanbanViewProps {
 interface IColumn {
   status: TaskStatus;
   label: string;
-  color: string;
 }
 
+// Colors come from the shared STATUS_COLORS map (models/index.ts) rather
+// than being hardcoded here a second time.
 const COLUMNS: IColumn[] = [
-  { status: 'Not Started', label: 'Not Started', color: '#8B929A' },
-  { status: 'In Progress', label: 'In Progress', color: '#0078D4' },
-  { status: 'On Hold', label: 'On Hold', color: '#CA5010' },
-  { status: 'Completed', label: 'Completed', color: '#107C10' },
+  { status: 'Not Started', label: 'Not Started' },
+  { status: 'In Progress', label: 'In Progress' },
+  { status: 'On Hold', label: 'On Hold' },
+  { status: 'Completed', label: 'Completed' },
 ];
 
-function isOverdue(task: ITask): boolean {
-  if (!task.dueDate || task.status === 'Completed' || task.status === 'Cancelled') return false;
-  const due = parseDateOnly(task.dueDate);
-  return !!due && due < todayLocalMidnight();
-}
-
-function initials(name: string): string {
-  if (!name) return '?';
-  return name.split(' ').map(p => p[0]).join('').substring(0, 2).toUpperCase();
-}
-
-function stringToColor(s: string): string {
-  let hash = 0;
-  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
-  return `hsl(${Math.abs(hash) % 360}, 55%, 45%)`;
-}
+// Left/Right arrow keys step through this same order — drag-and-drop is
+// otherwise the only way to move a card between columns, which a keyboard
+// or screen-reader user can't do at all.
+const STATUS_SEQUENCE: TaskStatus[] = [...COLUMNS.map(c => c.status), 'Cancelled'];
 
 export const KanbanView: React.FC<IKanbanViewProps> = ({
   tasks, showHealthBadges = true, onEditTask, onDeleteTask, onTaskUpdate, onAddTask,
@@ -89,8 +79,26 @@ export const KanbanView: React.FC<IKanbanViewProps> = ({
     setDragOverCol(status);
   };
 
-  const handleDragLeave = (): void => {
+  const handleDragLeave = (e: React.DragEvent): void => {
+    // dragleave fires when the pointer moves onto a descendant card, not
+    // just when it truly leaves the column — clearing unconditionally made
+    // the drop highlight/placeholder flicker while dragging across cards.
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
     setDragOverCol(null);
+  };
+
+  // Shared by drag-drop and the keyboard path so both keep % complete
+  // consistent with the new status the same way.
+  const moveTaskToStatus = (task: ITask, newStatus: TaskStatus): void => {
+    if (task.status === newStatus) return;
+    const updates: Partial<ITask> = { status: newStatus };
+    if (newStatus === 'Completed' && task.percentComplete < 100) {
+      updates.percentComplete = 100;
+    }
+    if (newStatus === 'Not Started' && task.percentComplete > 0) {
+      updates.percentComplete = 0;
+    }
+    onTaskUpdate(task.id, updates);
   };
 
   const handleDrop = (e: React.DragEvent, newStatus: TaskStatus): void => {
@@ -98,19 +106,21 @@ export const KanbanView: React.FC<IKanbanViewProps> = ({
     const taskId = parseInt(e.dataTransfer.getData('taskId'), 10);
     if (!isNaN(taskId)) {
       const task = tasks.find(t => t.id === taskId);
-      if (task && task.status !== newStatus) {
-        const updates: Partial<ITask> = { status: newStatus };
-        if (newStatus === 'Completed' && task.percentComplete < 100) {
-          updates.percentComplete = 100;
-        }
-        if (newStatus === 'Not Started' && task.percentComplete > 0) {
-          updates.percentComplete = 0;
-        }
-        onTaskUpdate(taskId, updates);
-      }
+      if (task) moveTaskToStatus(task, newStatus);
     }
     setDraggingId(null);
     setDragOverCol(null);
+  };
+
+  const handleCardKeyDown = (e: React.KeyboardEvent, task: ITask): void => {
+    if (e.key === 'Enter') { onEditTask(task); return; }
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const idx = STATUS_SEQUENCE.indexOf(task.status);
+    if (idx === -1) return;
+    const nextIdx = e.key === 'ArrowRight' ? idx + 1 : idx - 1;
+    if (nextIdx < 0 || nextIdx >= STATUS_SEQUENCE.length) return;
+    e.preventDefault();
+    moveTaskToStatus(task, STATUS_SEQUENCE[nextIdx]);
   };
 
   const renderCard = (task: ITask, colColor: string): React.ReactNode => {
@@ -126,6 +136,10 @@ export const KanbanView: React.FC<IKanbanViewProps> = ({
         draggable
         onDragStart={e => handleDragStart(e, task.id)}
         onDragEnd={handleDragEnd}
+        tabIndex={0}
+        role="button"
+        aria-label={`${task.title}, ${task.status}. Press Enter to edit, Left or Right arrow to change status.`}
+        onKeyDown={e => handleCardKeyDown(e, task)}
       >
         {/* Quick actions */}
         <div className={styles.cardActions}>
@@ -259,7 +273,7 @@ export const KanbanView: React.FC<IKanbanViewProps> = ({
             >
               {/* Column header */}
               <div className={styles.columnHeader}>
-                <div className={styles.columnDot} style={{ background: col.color }} />
+                <div className={styles.columnDot} style={{ background: STATUS_COLORS[col.status] }} />
                 <span className={styles.columnTitle}>{col.label}</span>
                 <span className={styles.columnCount}>{colTasks.length}</span>
               </div>
@@ -269,7 +283,7 @@ export const KanbanView: React.FC<IKanbanViewProps> = ({
                 {isDragOver && draggingId !== null && (
                   <div className={styles.dropPlaceholder} />
                 )}
-                {colTasks.map(task => renderCard(task, col.color))}
+                {colTasks.map(task => renderCard(task, STATUS_COLORS[col.status]))}
               </div>
 
               {/* Add card button */}

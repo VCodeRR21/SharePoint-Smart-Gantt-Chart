@@ -1,4 +1,4 @@
-# Smart Gantt Chart — User Guide · v1.2.1
+# Smart Gantt Chart — User Guide · v1.3.0
 
 ---
 
@@ -18,7 +18,8 @@
 12. [Exporting](#12-exporting)
 13. [Importing Tasks](#13-importing-tasks)
 14. [Working with Multiple Projects](#14-working-with-multiple-projects) (archive, unarchive, delete)
-15. [Tips and Tricks](#15-tips-and-tricks)
+15. [Accessibility and Touch Support](#15-accessibility-and-touch-support)
+16. [Tips and Tricks](#16-tips-and-tricks)
 
 ---
 
@@ -144,6 +145,10 @@ Click **+ Add Task** in the toolbar. The task panel slides in from the right wit
 - **Gantt / List view:** Hover over a task row to reveal the **✕** button and click it.
 - **Task panel:** There is no delete button in the panel — delete from the row hover action.
 
+### If you see "changed by someone else"
+
+If two people edit the same task or project at nearly the same time, whoever saves second will see a message like *"This task was changed by someone else since you loaded it. Refresh and try again."* This protects the first person's changes from being silently overwritten. If you see this message, refresh the project (switch away and back, or reload the page) to pick up the latest version, then re-apply your edit.
+
 ---
 
 ## 4. Filtering Tasks
@@ -225,6 +230,7 @@ The Gantt view is the heart of the web part. Switch to it using the **Gantt** bu
 - **Drag horizontally** to move the task's start and end dates together.
 - **Drag the right edge** to change only the end date.
 - **Hover** over any bar to see a tooltip with full task details.
+- On a **touchscreen or with a pen**, the same drag and resize gestures work — touch and drag a bar to move it, or drag its right edge to resize.
 
 ### Phase groups
 
@@ -596,7 +602,22 @@ Each project is stored in its own SharePoint list, so tasks from different proje
 
 ---
 
-## 15. Tips and Tricks
+## 15. Accessibility and Touch Support
+
+### Keyboard navigation
+
+- **List view column headers** — Tab to a column header and press **Enter** or **Space** to sort by it, same as clicking.
+- **Kanban cards** — Tab to a card. Press **Enter** to open it in the task panel. Press the **Left** or **Right** arrow key to move it to the previous or next status column (the same status/progress rules as dragging apply — see [Kanban View](#7-kanban-view)).
+- **Toolbar menus** — The project selector and the **⋯** menus can be opened with Enter or Space once focused, and every item inside them is reachable with Tab and activated with Enter or Space.
+- **Gantt bars** are not yet keyboard-movable — moving or resizing a bar still requires a mouse, touch, or pen. Use the row's **✏ Edit** button (reachable by keyboard) to change a task's dates from the task panel instead.
+
+### Touch and pen support
+
+Dragging and resizing task bars on the Gantt chart works with touch and pen input, not just a mouse — see [Gantt Chart View](#5-gantt-chart-view).
+
+---
+
+## 16. Tips and Tricks
 
 **Keep Phase names consistent**
 The Phase field autocompletes from existing values in the project. Using the same spelling every time ensures tasks are grouped correctly on the Gantt. A typo like "Desgin" instead of "Design" creates a separate group.

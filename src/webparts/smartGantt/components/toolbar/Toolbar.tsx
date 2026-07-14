@@ -4,6 +4,29 @@ import { IProject, ViewMode, ZoomLevel, IGanttDisplaySettings, ITaskFilter } fro
 import { FilterBar } from './FilterBar';
 import styles from './Toolbar.module.scss';
 
+// Callout items were plain divs with onClick only — reachable by mouse but
+// not by keyboard (a Callout can be opened via Enter/Space, but nothing
+// inside it could then be activated without a pointer). Centralized here
+// since the pattern repeats across the project selector and both "more
+// options" menus.
+const CalloutMenuItem: React.FC<{
+  onClick: () => void;
+  className?: string;
+  style?: React.CSSProperties;
+  children: React.ReactNode;
+}> = ({ onClick, className, style, children }) => (
+  <div
+    className={className}
+    style={style}
+    role="menuitem"
+    tabIndex={0}
+    onClick={onClick}
+    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
+  >
+    {children}
+  </div>
+);
+
 interface IToolbarProps {
   projects: IProject[];
   selectedProject: IProject | null;
@@ -40,7 +63,7 @@ interface IToolbarProps {
   totalCount: number;
 }
 
-export const Toolbar: React.FC<IToolbarProps> = ({
+const ToolbarComponent: React.FC<IToolbarProps> = ({
   projects,
   selectedProject,
   viewMode,
@@ -135,17 +158,17 @@ export const Toolbar: React.FC<IToolbarProps> = ({
             >
               <div style={{ paddingTop: 4, paddingBottom: 4 }}>
                 {/* Portfolio — cross-project overview */}
-                <div
+                <CalloutMenuItem
                   className={`${styles.calloutItem} ${viewMode === 'portfolio' ? styles.selected : ''}`}
                   onClick={() => { onViewChange('portfolio'); setProjectCalloutVisible(false); }}
                 >
                   <span style={{ fontSize: 14, marginRight: 6, flexShrink: 0 }}>⊞</span>
                   <span style={{ flex: 1 }}>Portfolio</span>
                   <span style={{ fontSize: 11, color: '#605E5C' }}>All projects</span>
-                </div>
+                </CalloutMenuItem>
                 <div className={styles.calloutSeparator} />
                 {projects.map(p => (
-                  <div
+                  <CalloutMenuItem
                     key={p.id}
                     className={`${styles.calloutItem} ${viewMode !== 'portfolio' && selectedProject?.id === p.id ? styles.selected : ''}`}
                     style={p.isArchived ? { opacity: 0.55 } : undefined}
@@ -157,28 +180,28 @@ export const Toolbar: React.FC<IToolbarProps> = ({
                       ? <span style={{ fontSize: 10, color: '#605E5C', background: '#F3F2F1', border: '1px solid #EDEBE9', borderRadius: 3, padding: '1px 5px' }}>Archived</span>
                       : <span style={{ fontSize: 11, color: '#605E5C' }}>{p.status}</span>
                     }
-                  </div>
+                  </CalloutMenuItem>
                 ))}
                 {projects.length === 0 && (
                   <div style={{ padding: '10px 16px', color: '#605E5C', fontSize: 13 }}>No projects yet</div>
                 )}
                 <div className={styles.calloutSeparator} />
                 {hasArchivedProjects && (
-                  <div
+                  <CalloutMenuItem
                     className={styles.calloutItem}
                     onClick={() => { onToggleShowArchived(); }}
                     style={{ color: '#605E5C' }}
                   >
                     <span style={{ marginRight: 6, fontSize: 13 }}>{showArchivedProjects ? '☑' : '☐'}</span>
                     <span>Show archived projects</span>
-                  </div>
+                  </CalloutMenuItem>
                 )}
-                <div className={styles.calloutItem} onClick={() => { setProjectCalloutVisible(false); onAddProject(); }}>
+                <CalloutMenuItem className={styles.calloutItem} onClick={() => { setProjectCalloutVisible(false); onAddProject(); }}>
                   + New Project
-                </div>
-                <div className={styles.calloutItem} onClick={() => { setProjectCalloutVisible(false); onImportAsProject(); }}>
+                </CalloutMenuItem>
+                <CalloutMenuItem className={styles.calloutItem} onClick={() => { setProjectCalloutVisible(false); onImportAsProject(); }}>
                   📥&ensp;Import File as New Project…
-                </div>
+                </CalloutMenuItem>
               </div>
             </Callout>
           )}
@@ -231,12 +254,12 @@ export const Toolbar: React.FC<IToolbarProps> = ({
                   calloutMinWidth={210}
                 >
                   <div style={{ paddingTop: 4, paddingBottom: 4 }}>
-                    <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onPortfolioExportExcel(); }}>
+                    <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onPortfolioExportExcel(); }}>
                       📊&ensp;Export to Excel
-                    </div>
-                    <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onPortfolioExportPowerPoint(); }}>
+                    </CalloutMenuItem>
+                    <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onPortfolioExportPowerPoint(); }}>
                       📑&ensp;Export to PowerPoint
-                    </div>
+                    </CalloutMenuItem>
                   </div>
                 </Callout>
               )}
@@ -305,36 +328,36 @@ export const Toolbar: React.FC<IToolbarProps> = ({
                   calloutMinWidth={200}
                 >
                   <div style={{ paddingTop: 4, paddingBottom: 4 }}>
-                    <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onImport(); }}>
+                    <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onImport(); }}>
                       📥&ensp;Import Tasks…
-                    </div>
-                    <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onExportExcel(); }}>
+                    </CalloutMenuItem>
+                    <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onExportExcel(); }}>
                       📊&ensp;Export to Excel
-                    </div>
-                    <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onExportPowerPoint(); }}>
+                    </CalloutMenuItem>
+                    <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onExportPowerPoint(); }}>
                       📑&ensp;Export to PowerPoint
-                    </div>
+                    </CalloutMenuItem>
                     {viewMode === 'gantt' && (
-                      <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onExportImage(); }}>
+                      <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onExportImage(); }}>
                         🖼&ensp;Export as Image (PNG)
-                      </div>
+                      </CalloutMenuItem>
                     )}
                     <div className={styles.calloutSeparator} />
-                    <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onEditProject(); }}>
+                    <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onEditProject(); }}>
                       ✏️&ensp;Edit Project
-                    </div>
+                    </CalloutMenuItem>
                     {selectedProject?.isArchived ? (
-                      <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onUnarchiveProject(); }}>
+                      <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onUnarchiveProject(); }}>
                         📂&ensp;Unarchive Project
-                      </div>
+                      </CalloutMenuItem>
                     ) : (
-                      <div className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onArchiveProject(); }}>
+                      <CalloutMenuItem className={styles.calloutItem} onClick={() => { setMoreCalloutVisible(false); onArchiveProject(); }}>
                         🗄️&ensp;Archive Project
-                      </div>
+                      </CalloutMenuItem>
                     )}
-                    <div className={`${styles.calloutItem} ${styles.danger}`} onClick={() => { setMoreCalloutVisible(false); onDeleteProject(); }}>
+                    <CalloutMenuItem className={`${styles.calloutItem} ${styles.danger}`} onClick={() => { setMoreCalloutVisible(false); onDeleteProject(); }}>
                       🗑️&ensp;Send to Recycle Bin
-                    </div>
+                    </CalloutMenuItem>
                   </div>
                 </Callout>
               )}
@@ -359,5 +382,7 @@ export const Toolbar: React.FC<IToolbarProps> = ({
     </div>
   );
 };
+
+export const Toolbar = React.memo(ToolbarComponent);
 
 export default Toolbar;

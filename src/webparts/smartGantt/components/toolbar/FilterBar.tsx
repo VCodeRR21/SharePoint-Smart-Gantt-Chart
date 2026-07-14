@@ -95,7 +95,7 @@ const DUE_OPTIONS: { id: DueFilter; label: string }[] = [
   { id: 'week', label: 'Due in 7 days' },
 ];
 
-export const FilterBar: React.FC<IFilterBarProps> = ({
+const FilterBarComponent: React.FC<IFilterBarProps> = ({
   filter, onChange, assignees, phases, matchCount, totalCount,
 }) => {
   const active = isFilterActive(filter);
@@ -103,19 +103,39 @@ export const FilterBar: React.FC<IFilterBarProps> = ({
     onChange({ ...filter, [key]: value });
   };
 
+  // The search box has local state debounced ~150ms before it reaches the
+  // parent — without it, every keystroke re-renders the toolbar plus the
+  // full Gantt/List/Kanban view underneath.
+  const [localText, setLocalText] = React.useState(filter.text);
+  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Keep local text in sync when the filter changes externally (project
+  // switch, "Clear filters").
+  React.useEffect(() => setLocalText(filter.text), [filter.text]);
+
+  React.useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+  }, []);
+
+  const handleTextChange = (v: string): void => {
+    setLocalText(v);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => set('text', v), 150);
+  };
+
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
       <input
         type="search"
-        value={filter.text}
-        onChange={e => set('text', e.target.value)}
+        value={localText}
+        onChange={e => handleTextChange(e.target.value)}
         placeholder="Search tasks…"
         aria-label="Search tasks"
         style={{
           width: 160,
           padding: '4px 10px',
           borderRadius: 12,
-          border: `1px solid ${filter.text ? '#0078D4' : '#D2D0CE'}`,
+          border: `1px solid ${localText ? '#0078D4' : '#D2D0CE'}`,
           fontSize: 12,
           outline: 'none',
           fontFamily: 'inherit',
@@ -174,7 +194,11 @@ export const FilterBar: React.FC<IFilterBarProps> = ({
               background: 'none', border: 'none', color: '#0078D4',
               fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: '3px 6px',
             }}
-            onClick={() => onChange({ text: '', statuses: [], priorities: [], assignees: [], phases: [], due: 'all' })}
+            onClick={() => {
+              if (debounceRef.current) clearTimeout(debounceRef.current);
+              setLocalText('');
+              onChange({ text: '', statuses: [], priorities: [], assignees: [], phases: [], due: 'all' });
+            }}
           >
             ✕ Clear filters
           </button>
@@ -183,5 +207,7 @@ export const FilterBar: React.FC<IFilterBarProps> = ({
     </div>
   );
 };
+
+export const FilterBar = React.memo(FilterBarComponent);
 
 export default FilterBar;

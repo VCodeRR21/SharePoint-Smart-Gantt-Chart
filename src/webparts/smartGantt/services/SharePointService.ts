@@ -33,6 +33,35 @@ function isNotFoundError(e: unknown): boolean {
   return msg.indexOf('404') !== -1 || /does not exist/i.test(msg);
 }
 
+// The free-name probe in _buildListName and the actual sp.web.lists.add()
+// call aren't atomic, so two concurrent creates can both see a name as free.
+// SharePoint's duplicate-title error is only distinguishable by message text.
+function isDuplicateListNameError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /already exists/i.test(msg);
+}
+
+// Thrown by SharePoint when an If-Match eTag no longer matches — i.e. someone
+// else saved this item since it was read.
+function isPreconditionFailedError(e: unknown): boolean {
+  const status = (e as { status?: number })?.status;
+  if (status === 412) return true;
+  const msg = e instanceof Error ? e.message : String(e);
+  return /412/.test(msg) || /precondition/i.test(msg);
+}
+
+// The Dependencies field is a plain Text column capped at 500 characters
+// (see field def below); a task with too many dependencies would otherwise
+// fail the save with a raw SharePoint error deep inside a PnPjs call.
+const DEPENDENCIES_MAX_LENGTH = 500;
+function joinDependencies(ids: number[] | undefined): string {
+  const joined = (ids || []).join(',');
+  if (joined.length > DEPENDENCIES_MAX_LENGTH) {
+    throw new Error(`This task has too many dependencies to save (limit is around 60). Remove some and try again.`);
+  }
+  return joined;
+}
+
 export class SharePointService {
   private sp: SPFI;
   private projectsListEnsured = false;
@@ -108,6 +137,9 @@ export class SharePointService {
         projectManagerEmail: item.ProjectManagerEmail || '',
         created: item.Created,
         isArchived: item.IsArchived === true,
+        // OData control metadata is present on every item regardless of the
+        // $select projection above, so no explicit select entry is needed.
+        etag: item['odata.etag'] as string | undefined,
       }))
       .sort((a, b) => a.title.localeCompare(b.title));
   }
@@ -123,9 +155,17 @@ export class SharePointService {
     await this.ensureProjectsList();
 
     const sanitized = data.title.replace(/[^a-zA-Z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'Project';
-    const listName = await this._buildListName(sanitized);
+    let listName = await this._buildListName(sanitized);
 
-    await this._createProjectList(listName);
+    try {
+      await this._createProjectList(listName);
+    } catch (e) {
+      // The free-name probe and this create call aren't atomic — retry once
+      // with a name a concurrent create couldn't have raced on.
+      if (!isDuplicateListNameError(e)) throw e;
+      listName = `${listName}_${Date.now().toString(36).toUpperCase()}`;
+      await this._createProjectList(listName);
+    }
 
     let result;
     try {
@@ -168,7 +208,14 @@ export class SharePointService {
     if (data.dueDate !== undefined) updates.ProjectDueDate = toSPDate(data.dueDate);
     if (data.status !== undefined) updates.ProjectStatus = data.status;
     if (data.isArchived !== undefined) updates.IsArchived = data.isArchived;
-    await this.sp.web.lists.getByTitle(PROJECTS_LIST).items.getById(id).update(updates);
+    try {
+      await this.sp.web.lists.getByTitle(PROJECTS_LIST).items.getById(id).update(updates, data.etag || '*');
+    } catch (e) {
+      if (isPreconditionFailedError(e)) {
+        throw new Error('This project was changed by someone else since you opened it. Refresh and try again.');
+      }
+      throw e;
+    }
   }
 
   async archiveProject(id: number): Promise<void> {
@@ -183,50 +230,62 @@ export class SharePointService {
     await this.sp.web.lists.getByTitle(PROJECTS_LIST).items.getById(id).recycle();
     try {
       await this.sp.web.lists.getByTitle(listName).recycle();
-    } catch {
-      // list may not exist; ignore
+    } catch (e) {
+      // A missing list is fine (already gone). Anything else — 403,
+      // throttling — must surface, or the task list is silently orphaned
+      // with no registry entry pointing back to it.
+      if (!isNotFoundError(e)) throw e;
     }
   }
 
   private async _createProjectList(listName: string): Promise<void> {
     await this.sp.web.lists.add(listName, 'Task list for Smart Gantt project', 100, false);
 
-    // Brief pause so SharePoint fully provisions the list before we add fields.
-    await new Promise<void>(resolve => setTimeout(resolve, 1500));
+    try {
+      // Brief pause so SharePoint fully provisions the list before we add fields.
+      await new Promise<void>(resolve => setTimeout(resolve, 1500));
 
-    // IsMilestone uses FieldTypeKind 8 (Boolean) via the generic add() because
-    // addBoolean() in PnPjs 3.x passes the wrong SP type and triggers a 400.
-    // All field adds go through a single REST batch — one round trip instead
-    // of fifteen. Individual failures (duplicate field, etc.) are non-fatal.
-    const [batchedSP, execute] = this.sp.batched();
-    const list = batchedSP.web.lists.getByTitle(listName);
-    const queue = (p: Promise<unknown>): void => {
-      p.catch(e => console.warn('[SmartGantt] Field creation warning (non-fatal):', e));
-    };
+      // IsMilestone uses FieldTypeKind 8 (Boolean) via the generic add() because
+      // addBoolean() in PnPjs 3.x passes the wrong SP type and triggers a 400.
+      // All field adds go through a single REST batch — one round trip instead
+      // of fifteen. Individual failures (duplicate field, etc.) are non-fatal.
+      const [batchedSP, execute] = this.sp.batched();
+      const list = batchedSP.web.lists.getByTitle(listName);
+      const queue = (p: Promise<unknown>): void => {
+        p.catch(e => console.warn('[SmartGantt] Field creation warning (non-fatal):', e));
+      };
 
-    queue(list.fields.addMultilineText('TaskDescription'));
-    queue(list.fields.addDateTime('StartDate'));
-    queue(list.fields.addDateTime('DueDate'));
-    queue(list.fields.addChoice('Status', {
-      Choices: ['Not Started', 'In Progress', 'Completed', 'On Hold', 'Cancelled'],
-    }));
-    queue(list.fields.addChoice('Priority', {
-      Choices: ['Critical', 'High', 'Medium', 'Low'],
-    }));
-    queue(list.fields.addNumber('PercentComplete'));
-    queue(list.fields.addNumber('ParentTaskId'));
-    queue(list.fields.addText('Dependencies', { MaxLength: 500 }));
-    queue(list.fields.addMultilineText('Notes'));
-    queue(list.fields.addText('TaskColor', { MaxLength: 20 }));
-    queue(list.fields.addNumber('SortOrder'));
-    queue(list.fields.add('IsMilestone', 8));
-    queue(list.fields.addText('Phase', { MaxLength: 100 }));
-    queue(list.fields.addText('AssignedToName', { MaxLength: 255 }));
-    queue(list.fields.addText('AssignedToEmail', { MaxLength: 255 }));
+      queue(list.fields.addMultilineText('TaskDescription'));
+      queue(list.fields.addDateTime('StartDate'));
+      queue(list.fields.addDateTime('DueDate'));
+      queue(list.fields.addChoice('Status', {
+        Choices: ['Not Started', 'In Progress', 'Completed', 'On Hold', 'Cancelled'],
+      }));
+      queue(list.fields.addChoice('Priority', {
+        Choices: ['Critical', 'High', 'Medium', 'Low'],
+      }));
+      queue(list.fields.addNumber('PercentComplete'));
+      queue(list.fields.addNumber('ParentTaskId', { Indexed: true }));
+      queue(list.fields.addText('Dependencies', { MaxLength: 500 }));
+      queue(list.fields.addMultilineText('Notes'));
+      queue(list.fields.addText('TaskColor', { MaxLength: 20 }));
+      queue(list.fields.addNumber('SortOrder'));
+      queue(list.fields.add('IsMilestone', 8));
+      queue(list.fields.addText('Phase', { MaxLength: 100 }));
+      queue(list.fields.addText('AssignedToName', { MaxLength: 255 }));
+      queue(list.fields.addText('AssignedToEmail', { MaxLength: 255 }));
 
-    await execute();
+      await execute();
 
-    await this._setupTaskListViews(listName);
+      await this._setupTaskListViews(listName);
+    } catch (e) {
+      // Anything past this point failing would otherwise leave the list
+      // behind with no registry entry pointing to it and no cleanup —
+      // createProject()'s own try/catch only covers the later registry-add
+      // step, not this one.
+      try { await this.sp.web.lists.getByTitle(listName).recycle(); } catch { /* best effort */ }
+      throw e;
+    }
   }
 
   // ─── Tasks ────────────────────────────────────────────────────────────────
@@ -264,6 +323,7 @@ export class SharePointService {
         phase: item.Phase || '',
         created: item.Created,
         modified: item.Modified,
+        etag: item['odata.etag'] as string | undefined,
       }))
       .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
   }
@@ -342,22 +402,31 @@ export class SharePointService {
         earliestStart: earliestStart || project.startDate || '',
         latestDue: latestDue || project.dueDate || '',
       };
-    } catch {
-      return empty;
+    } catch (e) {
+      // A genuinely missing list (project registry entry outlived its task
+      // list) really is an empty/on-track project. Anything else — 403,
+      // throttling, network — must not be reported as healthy; the caller
+      // should render it as unavailable instead.
+      if (isNotFoundError(e)) return empty;
+      return { ...empty, statsError: true };
     }
   }
 
   async getAllProjectStats(projects: IProject[]): Promise<Map<number, IProjectTaskStats>> {
-    const results = await Promise.all(
-      projects.map(p => this.getProjectTaskStats(p).then(stats => ({ id: p.id, stats })))
-    );
     const map = new Map<number, IProjectTaskStats>();
-    results.forEach(r => map.set(r.id, r.stats));
+    const CONCURRENCY = 5;
+    for (let start = 0; start < projects.length; start += CONCURRENCY) {
+      const chunk = projects.slice(start, start + CONCURRENCY);
+      const results = await Promise.all(
+        chunk.map(p => this.getProjectTaskStats(p).then(stats => ({ id: p.id, stats })))
+      );
+      results.forEach(r => map.set(r.id, r.stats));
+    }
     return map;
   }
 
-  async createTask(listName: string, task: Partial<ITask>): Promise<ITask> {
-    const result = await this.sp.web.lists.getByTitle(listName).items.add({
+  private _taskCreateFields(task: Partial<ITask>): Record<string, unknown> {
+    return {
       Title: task.title || 'New Task',
       TaskDescription: task.description || '',
       StartDate: toSPDate(task.startDate),
@@ -368,13 +437,17 @@ export class SharePointService {
       AssignedToEmail: task.assignedToEmail || '',
       PercentComplete: task.percentComplete || 0,
       ParentTaskId: task.parentTaskId || 0,
-      Dependencies: (task.dependencies || []).join(','),
+      Dependencies: joinDependencies(task.dependencies),
       Notes: task.notes || '',
       TaskColor: task.color || '',
       SortOrder: task.sortOrder || 0,
       IsMilestone: task.isMilestone || false,
       Phase: task.phase || '',
-    });
+    };
+  }
+
+  async createTask(listName: string, task: Partial<ITask>): Promise<ITask> {
+    const result = await this.sp.web.lists.getByTitle(listName).items.add(this._taskCreateFields(task));
 
     return {
       id: result.data.Id,
@@ -399,6 +472,37 @@ export class SharePointService {
     };
   }
 
+  /**
+   * Create many tasks in chunked REST batches (instead of one round trip per
+   * task) and report a per-row result in input order, so callers can align a
+   * created-id array back against their original rows (e.g. to resolve
+   * dependencies positionally after a bulk import).
+   */
+  async createTasksBatch(
+    listName: string,
+    tasks: Partial<ITask>[],
+    chunkSize = 50
+  ): Promise<Array<{ id: number | null; error?: string }>> {
+    const results: Array<{ id: number | null; error?: string }> = tasks.map(() => ({ id: null }));
+
+    for (let start = 0; start < tasks.length; start += chunkSize) {
+      const chunk = tasks.slice(start, start + chunkSize);
+      const [batchedSP, execute] = this.sp.batched();
+      const list = batchedSP.web.lists.getByTitle(listName);
+      chunk.forEach((task, i) => {
+        const idx = start + i;
+        list.items.add(this._taskCreateFields(task))
+          .then(r => { results[idx] = { id: r.data.Id }; })
+          .catch((e: unknown) => {
+            results[idx] = { id: null, error: e instanceof Error ? e.message : 'Unknown error' };
+          });
+      });
+      await execute();
+    }
+
+    return results;
+  }
+
   async updateTask(listName: string, id: number, updates: Partial<ITask>): Promise<void> {
     const data: Record<string, unknown> = {};
     if (updates.title !== undefined) data.Title = updates.title;
@@ -411,13 +515,20 @@ export class SharePointService {
     if (updates.assignedToEmail !== undefined) data.AssignedToEmail = updates.assignedToEmail;
     if (updates.percentComplete !== undefined) data.PercentComplete = updates.percentComplete;
     if (updates.parentTaskId !== undefined) data.ParentTaskId = updates.parentTaskId || 0;
-    if (updates.dependencies !== undefined) data.Dependencies = updates.dependencies.join(',');
+    if (updates.dependencies !== undefined) data.Dependencies = joinDependencies(updates.dependencies);
     if (updates.notes !== undefined) data.Notes = updates.notes;
     if (updates.color !== undefined) data.TaskColor = updates.color;
     if (updates.sortOrder !== undefined) data.SortOrder = updates.sortOrder;
     if (updates.isMilestone !== undefined) data.IsMilestone = updates.isMilestone;
     if (updates.phase !== undefined) data.Phase = updates.phase;
-    await this.sp.web.lists.getByTitle(listName).items.getById(id).update(data);
+    try {
+      await this.sp.web.lists.getByTitle(listName).items.getById(id).update(data, updates.etag || '*');
+    } catch (e) {
+      if (isPreconditionFailedError(e)) {
+        throw new Error('This task was changed by someone else since you loaded it. Refresh and try again.');
+      }
+      throw e;
+    }
   }
 
   async deleteTask(listName: string, id: number): Promise<void> {
@@ -425,19 +536,28 @@ export class SharePointService {
 
     // Promote sub-tasks to top level first, so they don't become invisible
     // orphans (views only render sub-tasks under an existing parent).
+    // getAll() (rather than a single top(500)) pages through every child,
+    // and any promotion failure aborts the delete instead of proceeding to
+    // recycle the parent — a partially-promoted set of children would
+    // otherwise be silently orphaned under a since-recycled parent.
     try {
-      const children = await list.items.select('Id').filter(`ParentTaskId eq ${id}`).top(500)();
-      if (children.length > 0) {
+      const children = await list.items.select('Id').filter(`ParentTaskId eq ${id}`).getAll();
+      const CHUNK_SIZE = 100;
+      for (let start = 0; start < children.length; start += CHUNK_SIZE) {
+        const chunk = children.slice(start, start + CHUNK_SIZE);
         const [batchedSP, execute] = this.sp.batched();
         const batchedList = batchedSP.web.lists.getByTitle(listName);
-        children.forEach(c => {
-          batchedList.items.getById(c.Id).update({ ParentTaskId: 0 })
-            .catch(e => console.warn('[SmartGantt] Sub-task promotion warning:', e));
+        const errors: unknown[] = [];
+        chunk.forEach(c => {
+          batchedList.items.getById(c.Id).update({ ParentTaskId: 0 }).catch(e => errors.push(e));
         });
         await execute();
+        if (errors.length > 0) throw errors[0];
       }
     } catch (e) {
-      console.warn('[SmartGantt] Orphan cleanup (non-fatal):', e);
+      throw new Error(
+        `Could not reassign this task's sub-tasks before deleting it: ${e instanceof Error ? e.message : 'unknown error'}`
+      );
     }
 
     // Recycle (not delete) so the task can be restored from the recycle bin.
@@ -455,13 +575,15 @@ export class SharePointService {
         const candidate = `${base}_${n}`;
         try {
           await this.sp.web.lists.getByTitle(candidate)();
-        } catch {
-          return candidate; // free
+        } catch (e) {
+          if (isNotFoundError(e)) return candidate; // free
+          throw e; // 403/throttling on the probe — not a real "taken" signal
         }
       }
       return `${base}_${Date.now().toString(36).toUpperCase()}`; // extremely unlikely fallback
-    } catch {
-      return base; // base name is free
+    } catch (e) {
+      if (isNotFoundError(e)) return base; // base name is free
+      throw e;
     }
   }
 

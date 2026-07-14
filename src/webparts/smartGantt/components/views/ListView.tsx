@@ -5,7 +5,8 @@ import {
   TASK_STATUS_OPTIONS, TASK_PRIORITY_OPTIONS,
 } from '../../models';
 import { computeTaskHealth, hasDependencyViolation } from '../../utils/healthUtils';
-import { parseDateOnly, formatDateOnly, todayLocalMidnight } from '../../utils/dateUtils';
+import { formatDateOnly, parseDateOnly } from '../../utils/dateUtils';
+import { isOverdue, initials, stringToColor } from '../../utils/taskDisplayUtils';
 import { HealthBadge } from '../common/HealthBadge';
 import styles from './ListView.module.scss';
 
@@ -22,23 +23,36 @@ interface IListViewProps {
 type SortField = 'sortOrder' | 'title' | 'startDate' | 'dueDate' | 'status' | 'priority' | 'assignedTo' | 'percentComplete' | 'phase';
 type SortDir = 'asc' | 'desc';
 
-function isOverdue(task: ITask): boolean {
-  if (!task.dueDate || task.status === 'Completed' || task.status === 'Cancelled') return false;
-  const due = parseDateOnly(task.dueDate);
-  return !!due && due < todayLocalMidnight();
+interface ISortThProps {
+  field: SortField;
+  label: string;
+  width?: number;
+  sortField: SortField;
+  sortDir: SortDir;
+  onSort: (field: SortField) => void;
 }
 
-function initials(name: string): string {
-  if (!name) return '?';
-  return name.split(' ').map(p => p[0]).join('').substring(0, 2).toUpperCase();
-}
-
-function stringToColor(s: string): string {
-  let hash = 0;
-  for (let i = 0; i < s.length; i++) hash = s.charCodeAt(i) + ((hash << 5) - hash);
-  const h = hash % 360;
-  return `hsl(${Math.abs(h)}, 55%, 45%)`;
-}
+// Module-scope (not defined inside ListView's render) so its component
+// identity is stable across renders — defining it inline made React remount
+// every header <th> (and its DOM/focus state) on every render.
+const SortTh: React.FC<ISortThProps> = ({ field, label, width, sortField, sortDir, onSort }) => (
+  <th
+    className={sortField === field ? styles.sorted : ''}
+    onClick={() => onSort(field)}
+    onKeyDown={e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSort(field); }
+    }}
+    tabIndex={0}
+    style={width ? { width } : undefined}
+    role="columnheader"
+    aria-sort={sortField === field ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+  >
+    {label}
+    {sortField === field && (
+      <span className={styles.sortArrow}>{sortDir === 'asc' ? '↑' : '↓'}</span>
+    )}
+  </th>
+);
 
 export const ListView: React.FC<IListViewProps> = ({
   tasks, showHealthBadges = true, onEditTask, onDeleteTask, onTaskUpdate, onAddTask,
@@ -68,9 +82,9 @@ export const ListView: React.FC<IListViewProps> = ({
 
   const violationIds = React.useMemo(() => {
     const set = new Set<number>();
-    tasks.forEach(t => { if (hasDependencyViolation(t, tasks)) set.add(t.id); });
+    tasks.forEach(t => { if (hasDependencyViolation(t, taskById)) set.add(t.id); });
     return set;
-  }, [tasks]);
+  }, [tasks, taskById]);
 
   const sortedTasks = React.useMemo(() => {
     const ids = new Set(tasks.map(t => t.id));
@@ -84,18 +98,31 @@ export const ListView: React.FC<IListViewProps> = ({
       children.get(t.parentTaskId!)!.push(t);
     });
 
+    // A missing date always sorts after every real date, regardless of
+    // direction — otherwise ascending order put every undated task first.
+    const UNDATED = Number.MAX_SAFE_INTEGER;
+
     const sortFn = (a: ITask, b: ITask): number => {
       let cmp: number;
       if (sortField === 'startDate' || sortField === 'dueDate') {
-        const av = parseDateOnly(a[sortField])?.getTime() ?? 0;
-        const bv = parseDateOnly(b[sortField])?.getTime() ?? 0;
+        const av = parseDateOnly(a[sortField])?.getTime() ?? UNDATED;
+        const bv = parseDateOnly(b[sortField])?.getTime() ?? UNDATED;
         cmp = av - bv;
       } else if (sortField === 'percentComplete' || sortField === 'sortOrder') {
         cmp = a[sortField] - b[sortField];
+      } else if (sortField === 'priority') {
+        cmp = TASK_PRIORITY_OPTIONS.indexOf(a.priority) - TASK_PRIORITY_OPTIONS.indexOf(b.priority);
+      } else if (sortField === 'status') {
+        cmp = TASK_STATUS_OPTIONS.indexOf(a.status) - TASK_STATUS_OPTIONS.indexOf(b.status);
       } else {
         cmp = String(a[sortField] ?? '').localeCompare(String(b[sortField] ?? ''), undefined, { sensitivity: 'base' });
       }
       if (cmp === 0) cmp = a.id - b.id;
+      // Undated tasks must land last in BOTH directions — negating cmp for
+      // desc would otherwise put them first again.
+      const isUndatedTiebreak = (sortField === 'startDate' || sortField === 'dueDate')
+        && ((parseDateOnly(a[sortField]) === null) !== (parseDateOnly(b[sortField]) === null));
+      if (isUndatedTiebreak) return parseDateOnly(a[sortField]) === null ? 1 : -1;
       return sortDir === 'asc' ? cmp : -cmp;
     };
 
@@ -113,34 +140,25 @@ export const ListView: React.FC<IListViewProps> = ({
 
     const rows: Array<{ type: 'task' | 'phase'; task?: ITask; phase?: string; isChild?: boolean }> = [];
 
-    const pushTask = (t: ITask): void => {
-      rows.push({ type: 'task', task: t, isChild: false });
-      (children.get(t.id) || []).sort(sortFn).forEach(c => rows.push({ type: 'task', task: c, isChild: true }));
+    // Recurse through every nesting level — a sub-task can itself have
+    // sub-tasks (via a direct list edit or import), so only appending direct
+    // children silently dropped grandchildren from the grid. `visited`
+    // guards against a parent-cycle in the raw data looping forever.
+    const pushTask = (t: ITask, visited: Set<number> = new Set()): void => {
+      rows.push({ type: 'task', task: t, isChild: visited.size > 0 });
+      if (visited.has(t.id)) return;
+      visited.add(t.id);
+      (children.get(t.id) || []).sort(sortFn).forEach(c => pushTask(c, visited));
     };
 
     byPhase.forEach((pTasks, phase) => {
       rows.push({ type: 'phase', phase });
-      [...pTasks].sort(sortFn).forEach(pushTask);
+      [...pTasks].sort(sortFn).forEach(t => pushTask(t));
     });
-    [...noPhase].sort(sortFn).forEach(pushTask);
+    [...noPhase].sort(sortFn).forEach(t => pushTask(t));
 
     return rows;
   }, [tasks, sortField, sortDir]);
-
-  const SortTh: React.FC<{ field: SortField; label: string; width?: number }> = ({ field, label, width }) => (
-    <th
-      className={sortField === field ? styles.sorted : ''}
-      onClick={() => handleSort(field)}
-      style={width ? { width } : undefined}
-      role="columnheader"
-      aria-sort={sortField === field ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
-    >
-      {label}
-      {sortField === field && (
-        <span className={styles.sortArrow}>{sortDir === 'asc' ? '↑' : '↓'}</span>
-      )}
-    </th>
-  );
 
   if (tasks.length === 0) {
     return (
@@ -168,15 +186,15 @@ export const ListView: React.FC<IListViewProps> = ({
         <table>
           <thead className={styles.thead}>
             <tr>
-              <SortTh field="title" label="Task Name" />
-              <SortTh field="status" label="Status" width={130} />
+              <SortTh field="title" label="Task Name" sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortTh field="status" label="Status" width={130} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               {showHealthBadges && <th style={{ width: 100 }}>Health</th>}
-              <SortTh field="priority" label="Priority" width={100} />
-              <SortTh field="startDate" label="Start" width={110} />
-              <SortTh field="dueDate" label="Due" width={110} />
-              <SortTh field="assignedTo" label="Assigned To" width={140} />
-              <SortTh field="percentComplete" label="Progress" width={140} />
-              <SortTh field="phase" label="Phase" width={110} />
+              <SortTh field="priority" label="Priority" width={100} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortTh field="startDate" label="Start" width={110} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortTh field="dueDate" label="Due" width={110} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortTh field="assignedTo" label="Assigned To" width={140} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortTh field="percentComplete" label="Progress" width={140} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
+              <SortTh field="phase" label="Phase" width={110} sortField={sortField} sortDir={sortDir} onSort={handleSort} />
               <th style={{ width: 160 }}>Predecessors</th>
               <th style={{ width: 72 }} />
             </tr>

@@ -1,7 +1,7 @@
 import * as React from 'react';
 import { Spinner, SpinnerSize } from '@fluentui/react';
 import { differenceInCalendarDays } from 'date-fns';
-import { IProject, IProjectTaskStats } from '../../models';
+import { IProject, IProjectTaskStats, PROJECT_STATUS_COLORS, PROJECT_STATUS_LIGHT_COLORS } from '../../models';
 import { HealthBadge } from '../common/HealthBadge';
 import { ProjectHealth } from '../../models';
 import { parseDateOnly, formatDateOnly, todayLocalMidnight } from '../../utils/dateUtils';
@@ -20,22 +20,6 @@ export interface IPortfolioViewProps {
 type SortKey = 'name' | 'health' | 'status' | 'completion';
 
 const HEALTH_ORDER: Record<ProjectHealth, number> = { overdue: 0, 'at-risk': 1, 'on-track': 2, complete: 3 };
-
-const STATUS_COLORS: Record<string, string> = {
-  Planning: '#8764B8',
-  Active: '#0078D4',
-  'On Hold': '#CA5010',
-  Completed: '#107C10',
-  Cancelled: '#8B929A',
-};
-
-const STATUS_LIGHT_COLORS: Record<string, string> = {
-  Planning: '#F3EFF8',
-  Active: '#EFF6FC',
-  'On Hold': '#FFF4EC',
-  Completed: '#F1FAF1',
-  Cancelled: '#F3F2F1',
-};
 
 function formatDate(s: string): string {
   return formatDateOnly(s, 'MMM d, yyyy');
@@ -62,8 +46,10 @@ const MiniTimeline: React.FC<IMiniTimelineProps> = ({ start, end, color }) => {
 
   if (!startDate || !endDate) return null;
 
-  const total = differenceInCalendarDays(endDate, startDate);
-  if (total <= 0) return null;
+  // A single-day project (start === end) is a legitimate 1-day span, not a
+  // reason to render nothing — only a genuinely inverted range bails out.
+  if (endDate < startDate) return null;
+  const total = Math.max(1, differenceInCalendarDays(endDate, startDate));
 
   const elapsed = Math.max(0, Math.min(total, differenceInCalendarDays(today, startDate)));
   const todayPct = Math.round((elapsed / total) * 100);
@@ -114,8 +100,8 @@ interface IProjectCardProps {
 }
 
 const ProjectCard: React.FC<IProjectCardProps> = ({ project, stats, statsLoading, onClick }) => {
-  const statusColor = STATUS_COLORS[project.status] || '#8B929A';
-  const statusBg = STATUS_LIGHT_COLORS[project.status] || '#F3F2F1';
+  const statusColor = PROJECT_STATUS_COLORS[project.status] || '#8B929A';
+  const statusBg = PROJECT_STATUS_LIGHT_COLORS[project.status] || '#F3F2F1';
 
   return (
     <div
@@ -159,7 +145,15 @@ const ProjectCard: React.FC<IProjectCardProps> = ({ project, stats, statsLoading
             }}>
               {project.status}
             </span>
-            {stats && <HealthBadge health={stats.health} size="md" />}
+            {stats && !stats.statsError && <HealthBadge health={stats.health} size="md" />}
+            {stats?.statsError && (
+              <span style={{
+                display: 'inline-block', padding: '2px 8px', borderRadius: 10,
+                background: '#FDF3F4', color: '#D13438', fontSize: 11, fontWeight: 600,
+              }}>
+                Stats unavailable
+              </span>
+            )}
           </div>
         </div>
         {project.projectManager && (
@@ -187,6 +181,10 @@ const ProjectCard: React.FC<IProjectCardProps> = ({ project, stats, statsLoading
       {/* Progress bar */}
       {statsLoading && !stats ? (
         <div style={{ height: 32, background: '#F3F2F1', borderRadius: 4, animation: 'pulse 1.5s ease-in-out infinite' }} />
+      ) : stats?.statsError ? (
+        <div style={{ fontSize: 12, color: '#605E5C', padding: '8px 0' }}>
+          Could not load task stats for this project — permissions or a network issue may be blocking access.
+        </div>
       ) : stats ? (
         <>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#605E5C', marginBottom: 4 }}>
@@ -285,6 +283,7 @@ export const PortfolioView: React.FC<IPortfolioViewProps> = ({
     if (!statsMap) return null;
     let onTrack = 0, atRisk = 0, overdue = 0, complete = 0;
     statsMap.forEach(s => {
+      if (s.statsError) return;
       if (s.health === 'on-track') onTrack++;
       else if (s.health === 'at-risk') atRisk++;
       else if (s.health === 'overdue') overdue++;

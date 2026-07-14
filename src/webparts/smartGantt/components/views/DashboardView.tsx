@@ -3,6 +3,7 @@ import { addDays, differenceInCalendarDays } from 'date-fns';
 import {
   IProject, ITask, TaskStatus,
   STATUS_COLORS, STATUS_LIGHT_COLORS, PRIORITY_COLORS, phaseColor,
+  PROJECT_STATUS_COLORS, PROJECT_STATUS_LIGHT_COLORS,
 } from '../../models';
 import { parseDateOnly, formatDateOnly, todayLocalMidnight } from '../../utils/dateUtils';
 
@@ -112,58 +113,74 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
   project, tasks, onEditTask, onAddTask,
 }) => {
   const today = todayLocalMidnight();
-  const in14 = addDays(today, 14);
-  const weekAgo = addDays(today, -7);
 
   // ── Aggregate stats ──────────────────────────────────────────────────────
   const total = tasks.length;
-  const byStatus: Record<string, number> = {
-    'Completed': 0, 'In Progress': 0, 'Not Started': 0, 'On Hold': 0, 'Cancelled': 0,
-  };
-  tasks.forEach(t => { if (byStatus[t.status] !== undefined) byStatus[t.status]++; });
+  const byStatus = React.useMemo(() => {
+    const counts: Record<string, number> = {
+      'Completed': 0, 'In Progress': 0, 'Not Started': 0, 'On Hold': 0, 'Cancelled': 0,
+    };
+    tasks.forEach(t => { if (counts[t.status] !== undefined) counts[t.status]++; });
+    return counts;
+  }, [tasks]);
   const overallPct = total > 0
     ? Math.round(tasks.reduce((s, t) => s + t.percentComplete, 0) / total)
     : 0;
 
   // ── Phase progress ───────────────────────────────────────────────────────
-  const phaseMap = new Map<string, ITask[]>();
-  tasks.forEach(t => {
-    if (!t.phase) return;
-    if (!phaseMap.has(t.phase)) phaseMap.set(t.phase, []);
-    phaseMap.get(t.phase)!.push(t);
-  });
-  const phases = Array.from(phaseMap.entries()).map(([name, pts]) => ({
-    name,
-    color: phaseColor(name),
-    total: pts.length,
-    completed: pts.filter(t => t.status === 'Completed').length,
-    pct: Math.round(pts.reduce((s, t) => s + t.percentComplete, 0) / pts.length),
-  }));
+  const phases = React.useMemo(() => {
+    const phaseMap = new Map<string, ITask[]>();
+    tasks.forEach(t => {
+      if (!t.phase) return;
+      if (!phaseMap.has(t.phase)) phaseMap.set(t.phase, []);
+      phaseMap.get(t.phase)!.push(t);
+    });
+    return Array.from(phaseMap.entries()).map(([name, pts]) => ({
+      name,
+      color: phaseColor(name),
+      total: pts.length,
+      completed: pts.filter(t => t.status === 'Completed').length,
+      pct: Math.round(pts.reduce((s, t) => s + t.percentComplete, 0) / pts.length),
+    }));
+  }, [tasks]);
 
   // ── Time-based groups ────────────────────────────────────────────────────
-  const recentlyModified = tasks.filter(t => {
-    const mod = parseTimestamp(t.modified);
-    return mod !== null && mod >= weekAgo && t.status !== 'Completed';
-  }).slice(0, 6);
+  const { recentlyModified, recentlyCompleted, upcoming, overdue } = React.useMemo(() => {
+    const in14 = addDays(today, 14);
+    const weekAgo = addDays(today, -7);
+    const byModifiedDesc = (a: ITask, b: ITask): number =>
+      (parseTimestamp(b.modified)?.getTime() ?? 0) - (parseTimestamp(a.modified)?.getTime() ?? 0);
 
-  const recentlyCompleted = tasks.filter(t => {
-    const mod = parseTimestamp(t.modified);
-    return mod !== null && mod >= weekAgo && t.status === 'Completed';
-  }).slice(0, 4);
+    const recentlyModified = tasks.filter(t => {
+      const mod = parseTimestamp(t.modified);
+      return mod !== null && mod >= weekAgo && t.status !== 'Completed';
+    }).sort(byModifiedDesc).slice(0, 6);
 
-  const upcoming = tasks.filter(t => {
-    const due = parseDateOnly(t.dueDate);
-    return due !== null && due >= today && due <= in14 && t.status !== 'Completed' && t.status !== 'Cancelled';
-  }).sort((a, b) => (a.dueDate > b.dueDate ? 1 : -1)).slice(0, 6);
+    const recentlyCompleted = tasks.filter(t => {
+      const mod = parseTimestamp(t.modified);
+      return mod !== null && mod >= weekAgo && t.status === 'Completed';
+    }).sort(byModifiedDesc).slice(0, 4);
 
-  const overdue = tasks.filter(t => {
-    const due = parseDateOnly(t.dueDate);
-    return due !== null && due < today && t.status !== 'Completed' && t.status !== 'Cancelled';
-  }).sort((a, b) => (a.dueDate < b.dueDate ? 1 : -1)).slice(0, 6);
+    const upcoming = tasks.filter(t => {
+      const due = parseDateOnly(t.dueDate);
+      return due !== null && due >= today && due <= in14 && t.status !== 'Completed' && t.status !== 'Cancelled';
+    }).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 6);
+
+    const overdue = tasks.filter(t => {
+      const due = parseDateOnly(t.dueDate);
+      return due !== null && due < today && t.status !== 'Completed' && t.status !== 'Cancelled';
+    }).sort((a, b) => b.dueDate.localeCompare(a.dueDate)).slice(0, 6);
+
+    return { recentlyModified, recentlyCompleted, upcoming, overdue };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tasks, today.getTime()]);
 
   // ── Priority breakdown ───────────────────────────────────────────────────
-  const byPriority: Record<string, number> = { Critical: 0, High: 0, Medium: 0, Low: 0 };
-  tasks.forEach(t => { if (byPriority[t.priority] !== undefined) byPriority[t.priority]++; });
+  const byPriority = React.useMemo(() => {
+    const counts: Record<string, number> = { Critical: 0, High: 0, Medium: 0, Low: 0 };
+    tasks.forEach(t => { if (counts[t.priority] !== undefined) counts[t.priority]++; });
+    return counts;
+  }, [tasks]);
 
   const priorityItems = [
     { label: 'Critical', color: PRIORITY_COLORS['Critical'] },
@@ -192,8 +209,8 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
           )}
           <div style={{
             fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 4,
-            background: STATUS_LIGHT_COLORS[project.status as TaskStatus] || '#F3F2F1',
-            color: STATUS_COLORS[project.status as TaskStatus] || '#605E5C',
+            background: PROJECT_STATUS_LIGHT_COLORS[project.status] || '#F3F2F1',
+            color: PROJECT_STATUS_COLORS[project.status] || '#605E5C',
           }}>
             {project.status}
           </div>
