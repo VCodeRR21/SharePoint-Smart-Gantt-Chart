@@ -49,7 +49,7 @@ A SharePoint Framework (SPFx) web part for project management with five views �
 ![Gantt Chart View](docs/screenshots/screenshot-gantt.png)
 
 - Colored project title bar at the top of the timeline
-- Two-row toolbar: project/task actions on the first row; view and zoom controls on the second
+- Three-row toolbar: project/task actions, view/zoom controls, and the Task Filter Bar (see below)
 - Sticky task list on the left; scrollable SVG timeline on the right
 - Four zoom levels: Day, Week, Month, Quarter
 - Task bars color-coded by status, priority, phase, or health; progress overlay shows % complete
@@ -58,6 +58,18 @@ A SharePoint Framework (SPFx) web part for project management with five views �
 - Phase rows collapse/expand to group related tasks
 - Hover tooltip shows task name, dates, status, priority, assignee, % complete, and health indicator
 - Today line with red indicator
+- **Milestones** render as a ◆ diamond marker instead of a bar, at the task's date on the timeline:
+
+  ![Milestone marker on the Gantt timeline](docs/screenshots/screenshot-milestone.png)
+
+### Task Filter Bar
+
+![Task Filter Bar — active Status filter](docs/screenshots/screenshot-filter-bar.png)
+
+- Third toolbar row, shown whenever the current project has at least one task
+- Text search, plus multi-select Status / Priority / Assignee / Phase filters and a due-date filter
+- A match count (e.g. *"2 of 10"*) and a one-click **✕ Clear filters** appear once any filter is active
+- Active filters persist as you switch between Gantt, List, Kanban, and Dashboard
 
 ### List View
 
@@ -301,6 +313,8 @@ The web part creates and manages two types of lists on the current site:
 
 ## Importing Tasks
 
+![Import Tasks dialog — source picker](docs/screenshots/screenshot-import-dialog.png)
+
 **Two import paths:**
 
 - **Import File as New Project** — click the project selector dropdown → **📥 Import File as New Project…** to create a new project directly from an Excel or CSV file
@@ -469,6 +483,10 @@ All other configuration (projects, tasks, colors, display settings) is managed t
 | ![Display Settings](docs/screenshots/screenshot-display-settings.png) | ![Export menu](docs/screenshots/screenshot-export-menu.png) |
 | **Task panel — Details tab** | **Task panel — Links tab** |
 | ![Task panel — Details tab](docs/screenshots/screenshot-task-panel-details.png) | ![Task panel — Links tab](docs/screenshots/screenshot-task-panel-links.png) |
+| **Task Filter Bar (active filter)** | **Import Tasks dialog** |
+| ![Task Filter Bar](docs/screenshots/screenshot-filter-bar.png) | ![Import Tasks dialog](docs/screenshots/screenshot-import-dialog.png) |
+| **Milestone marker on the Gantt** | |
+| ![Milestone marker](docs/screenshots/screenshot-milestone.png) | |
 
 ---
 

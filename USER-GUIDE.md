@@ -155,6 +155,8 @@ If two people edit the same task or project at nearly the same time, whoever sav
 
 The **Filter Bar** appears as a third row in the toolbar whenever a project has at least one task. It works across all views — Gantt, List, Kanban, and Dashboard — and any active filters stay in place when you switch between views.
 
+![Task Filter Bar with an active Status filter](docs/screenshots/screenshot-filter-bar.png)
+
 ### Filter controls
 
 | Control | What it filters |
@@ -231,6 +233,12 @@ The Gantt view is the heart of the web part. Switch to it using the **Gantt** bu
 - **Drag the right edge** to change only the end date.
 - **Hover** over any bar to see a tooltip with full task details.
 - On a **touchscreen or with a pen**, the same drag and resize gestures work — touch and drag a bar to move it, or drag its right edge to resize.
+
+### Milestones
+
+A task with **Milestone** toggled on (Details tab of the task panel) renders as a ◆ diamond at its date instead of a bar. Hover it to see the same tooltip as any other task — title, date, status, priority, % complete, and health.
+
+![Milestone marker on the Gantt timeline](docs/screenshots/screenshot-milestone.png)
 
 ### Phase groups
 
@@ -526,6 +534,8 @@ The import panel walks you through four steps:
 ### Step 1 — Source
 
 Choose where your tasks are coming from:
+
+![Import Tasks dialog — source picker](docs/screenshots/screenshot-import-dialog.png)
 
 #### Excel / CSV
 - Drag and drop a `.xlsx`, `.xls`, `.csv`, or `.ods` file, or click to browse

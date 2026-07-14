@@ -164,30 +164,53 @@ function ganttSVG() {
     bars.push(`<line x1="${LW}" y1="${y0+RH}" x2="${LW+TW}" y2="${y0+RH}" stroke="#F3F2F1" stroke-width="1"/>`);
   });
 
-  // Dependency arrows
+  // Dependency arrows — orthogonal (90°) routing only, matching
+  // GanttChart.tsx's renderDependencyArrows() exactly: a forward elbow
+  // (H/V/H) for the common case, a routing lane in the mid-gap between rows
+  // when the dependency starts after its successor, and a special case when
+  // the dependency itself is a milestone (anchored at the diamond's bottom
+  // tip, not its bounding box). Previously this drew a smooth Bézier curve,
+  // which the real app hasn't used since v1.2.1.
   const taskById2 = new Map(TASKS.map(t => [t.id, t]));
   const rowIdxById = new Map();
   rows.forEach((row, i) => { if (row.type === 'task') rowIdxById.set(row.task.id, i); });
   const arrowPaths = [];
+  const MS = 9; // matches the diamond half-size used in the milestone drawing above
   TASKS.forEach(task => {
     if (!task.deps || !task.deps.length) return;
     const taskRowIdx = rowIdxById.get(task.id);
     if (taskRowIdx === undefined) return;
-    const toX = task.milestone
-      ? LW + days(new Date(task.start))*D + D/2 - 9
-      : LW + days(new Date(task.start))*D;
-    const toY = TH + HH + taskRowIdx*RH + RH/2;
+    const toX = LW + days(new Date(task.start)) * D - 2;
+    const toY = TH + HH + taskRowIdx * RH + RH / 2;
     task.deps.forEach(depId => {
       const dep = taskById2.get(depId);
       if (!dep) return;
       const depRowIdx = rowIdxById.get(depId);
       if (depRowIdx === undefined) return;
-      const fromX = dep.milestone
-        ? LW + days(new Date(dep.start))*D + D/2 + 9
-        : LW + (days(new Date(dep.end))+1)*D;
-      const fromY = TH + HH + depRowIdx*RH + RH/2;
-      const midX = fromX + (toX - fromX)/2;
-      arrowPaths.push(`<path d="M ${fromX} ${fromY} C ${midX} ${fromY}, ${midX} ${toY}, ${toX} ${toY}" stroke="#8A8886" stroke-width="1.5" fill="none" marker-end="url(#dep-arrow)"/>`);
+      const fromY = TH + HH + depRowIdx * RH + RH / 2;
+      const routePad = Math.max(D * 0.6, 10);
+
+      let pathD;
+      if (dep.milestone) {
+        const mx = LW + days(new Date(dep.start)) * D + D / 2;
+        const myBottom = fromY + MS;
+        if (toX > mx) {
+          pathD = `M ${mx} ${myBottom} V ${toY} H ${toX}`;
+        } else {
+          const barTopY = TH + HH + taskRowIdx * RH + (RH - BH) / 2 - 2;
+          pathD = `M ${mx} ${myBottom} V ${barTopY}`;
+        }
+      } else {
+        const fromX = LW + (days(new Date(dep.end)) + 1) * D;
+        if (toX >= fromX) {
+          const midX = fromX + (toX - fromX) / 2;
+          pathD = `M ${fromX} ${fromY} H ${midX} V ${toY} H ${toX}`;
+        } else {
+          const overshoot = toY >= fromY ? toY - RH * 0.5 : toY + RH * 0.5;
+          pathD = `M ${fromX} ${fromY} H ${fromX + routePad} V ${overshoot} H ${toX - routePad} V ${toY} H ${toX}`;
+        }
+      }
+      arrowPaths.push(`<path d="${pathD}" stroke="#8A8886" stroke-width="1.5" fill="none" marker-end="url(#dep-arrow)"/>`);
     });
   });
 
@@ -271,10 +294,43 @@ body { font-family: 'Segoe UI', Arial, sans-serif; background: #FAF9F8; color: #
 .row2-left { display:flex; align-items:center; gap:8px; flex:1; }
 .row2-right { display:flex; align-items:center; gap:6px; margin-left:auto; }
 .today-btn { padding:5px 10px; font-size:12px; background:#fff; border:1px solid #EDEBE9; border-radius:4px; cursor:pointer; color:#323130; font-family:inherit; }
+
+/* Row 3 — Task Filter Bar */
+.row3 { display:flex; align-items:center; gap:6px; flex-wrap:wrap; height:40px; border-top:1px solid #F3F2F1; }
+.filter-search { width:160px; padding:4px 10px; border-radius:12px; border:1px solid #D2D0CE; font-size:12px; font-family:inherit; color:#323130; }
+.filter-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 10px; border-radius:12px; font-size:12px; font-weight:400; cursor:pointer; border:1px solid #D2D0CE; background:#fff; color:#605E5C; font-family:inherit; white-space:nowrap; }
+.filter-chip.active { border-color:${PROJECT.color}; background:#EFF6FC; color:${PROJECT.color}; font-weight:600; }
+.filter-clear { background:none; border:none; color:${PROJECT.color}; font-size:12px; font-weight:600; cursor:pointer; padding:3px 6px; font-family:inherit; }
+.filter-count { font-size:12px; color:#605E5C; }
 `;
 
+// ── Task Filter Bar (row 3) ─────────────────────────────────────────────────
+// filterState: 'neutral' (no active filters — most screenshots) or an object
+// describing an active filter, e.g. { statusActive: true, matchCount: 4, totalCount: 10 }
+function filterBarRow(filterState = 'neutral') {
+  const active = filterState !== 'neutral';
+  const statusActive = active && filterState.statusActive;
+  return `<div class="row3">
+    <input class="filter-search" type="search" placeholder="Search tasks…" value="${active && filterState.searchText ? filterState.searchText : ''}"/>
+    <button class="filter-chip ${statusActive ? 'active' : ''}">Status${statusActive ? ' (1)' : ''} ▾</button>
+    <button class="filter-chip">Priority ▾</button>
+    <button class="filter-chip">Assignee ▾</button>
+    <button class="filter-chip">Phase ▾</button>
+    <select class="filter-chip" style="appearance:none;-webkit-appearance:none;padding-right:18px;">
+      <option>Any due date</option>
+      <option>Overdue</option>
+      <option>Due today</option>
+      <option>Due in 7 days</option>
+    </select>
+    ${active ? `
+      <span class="filter-count">${filterState.matchCount} of ${filterState.totalCount}</span>
+      <button class="filter-clear">✕ Clear filters</button>
+    ` : ''}
+  </div>`;
+}
+
 // ── Toolbar HTML ───────────────────────────────────────────────────────────
-function toolbar(view, extra = '') {
+function toolbar(view, extra = '', filterState = 'neutral') {
   return `<div class="toolbar">
   <div class="row1">
     <div class="project-selector">
@@ -310,6 +366,7 @@ function toolbar(view, extra = '') {
       <button class="icon-btn">⋯</button>
     </div>
   </div>
+  ${filterBarRow(filterState)}
 </div>`;
 }
 
@@ -334,13 +391,17 @@ function ganttPage() {
 }
 
 // ── 2. List view ───────────────────────────────────────────────────────────
-function listPage() {
+function listPage(filterState = 'neutral') {
   const fmtDate = d => new Date(d).toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'});
   const isOverdue = d => new Date(d) < TODAY;
 
+  const visibleTasks = (filterState !== 'neutral' && filterState.filterStatuses)
+    ? TASKS.filter(t => filterState.filterStatuses.includes(t.status))
+    : TASKS;
+
   let rows = '';
   let lastPhase = null;
-  for (const t of TASKS) {
+  for (const t of visibleTasks) {
     if (t.phase !== lastPhase) {
       rows += `<tr style="background:#F3F2F1;"><td colspan="8" style="padding:6px 12px;font-size:11px;font-weight:700;color:#605E5C;letter-spacing:0.5px;">${t.phase.toUpperCase()}</td></tr>`;
       lastPhase = t.phase;
@@ -372,7 +433,7 @@ function listPage() {
   }
 
   return page(`
-    ${toolbar('list')}
+    ${toolbar('list', '', filterState)}
     <div style="overflow:auto;background:#fff;">
       <table style="width:100%;border-collapse:collapse;">
         <thead>
@@ -391,6 +452,19 @@ function listPage() {
       </table>
     </div>
   `);
+}
+
+// ── 2b. List view — active Task Filter Bar ──────────────────────────────────
+// The Filter Bar is a real, documented feature (README/USER-GUIDE §4) that
+// had no screenshot anywhere in docs/screenshots — this demonstrates it live.
+function filterActivePage() {
+  const inProgressCount = TASKS.filter(t => t.status === 'In Progress').length;
+  return listPage({
+    statusActive: true,
+    filterStatuses: ['In Progress'],
+    matchCount: inProgressCount,
+    totalCount: TASKS.length,
+  });
 }
 
 // ── 3. Kanban view ─────────────────────────────────────────────────────────
@@ -531,7 +605,7 @@ function displaySettingsPage() {
     ${toolbar('gantt')}
     <div style="display:flex;position:relative;">
       <div style="flex:1;overflow:auto;">${svg}</div>
-      <div style="width:300px;flex-shrink:0;border-left:1px solid #EDEBE9;background:#fff;height:740px;overflow:auto;padding:16px;">
+      <div style="width:330px;flex-shrink:0;border-left:1px solid #EDEBE9;background:#fff;height:860px;overflow:auto;padding:16px;">
         <div style="font-size:15px;font-weight:700;color:#323130;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid #EDEBE9;">Display Settings</div>
 
         <div style="margin-bottom:16px;">
@@ -570,7 +644,7 @@ function displaySettingsPage() {
 
         <div style="margin-bottom:16px;">
           <div style="font-size:12px;font-weight:600;color:#323130;margin-bottom:8px;">Row Height</div>
-          ${['Compact (32px)','Normal (40px)','Spacious (52px)'].map((o,i)=>`
+          ${['Compact (36px)','Normal (40px)','Spacious (52px)'].map((o,i)=>`
           <label style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;">
             <input type="radio" name="row" ${i===1?'checked':''} style="accent-color:${PROJECT.color};"/> <span style="font-size:13px;color:#323130;">${o}</span>
           </label>`).join('')}
@@ -578,13 +652,28 @@ function displaySettingsPage() {
 
         <div>
           <div style="font-size:12px;font-weight:600;color:#323130;margin-bottom:8px;">Show / Hide</div>
-          ${['Weekend shading','Dependency arrows','Progress % on bars','Assignee name on bars','Health status badges'].map((o,i)=>`
-          <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;">
-            <div style="width:32px;height:18px;background:${i<3?PROJECT.color:'#EDEBE9'};border-radius:9px;position:relative;flex-shrink:0;">
-              <div style="width:14px;height:14px;background:white;border-radius:50%;position:absolute;top:2px;${i<3?'right:2px':'left:2px'};box-shadow:0 1px 3px rgba(0,0,0,0.2);"></div>
-            </div>
-            <span style="font-size:13px;color:#323130;">${o}</span>
-          </label>`).join('')}
+          ${(() => {
+            // Matches DEFAULT_GANTT_SETTINGS in models/index.ts: dependency
+            // arrows on with both sub-options on by default; critical path
+            // highlight off by default (a separate toggle from arrow visibility).
+            const toggleRow = (label, on, indent) => `
+              <label style="display:flex;align-items:center;gap:8px;padding:5px 0;cursor:pointer;${indent ? 'padding-left:20px;' : ''}">
+                <div style="width:32px;height:18px;background:${on?PROJECT.color:'#EDEBE9'};border-radius:9px;position:relative;flex-shrink:0;">
+                  <div style="width:14px;height:14px;background:white;border-radius:50%;position:absolute;top:2px;${on?'right:2px':'left:2px'};box-shadow:0 1px 3px rgba(0,0,0,0.2);"></div>
+                </div>
+                <span style="font-size:13px;color:${indent?'#605E5C':'#323130'};">${label}</span>
+              </label>`;
+            return [
+              toggleRow('Weekend shading', true, false),
+              toggleRow('Dependency arrows', true, false),
+              toggleRow('Critical path always visible', true, true),
+              toggleRow('All others on hover only', true, true),
+              toggleRow('Critical path highlight', false, false),
+              toggleRow('Progress % on bars', true, false),
+              toggleRow('Assignee name on bars', false, false),
+              toggleRow('Health status badges', true, false),
+            ].join('');
+          })()}
         </div>
       </div>
     </div>
@@ -610,6 +699,198 @@ function exportMenuPage() {
           <div style="padding:9px 16px;font-size:13px;color:#D13438;cursor:pointer;">🗑️&ensp;Delete Project</div>
         </div>
       </div>
+    </div>
+  `);
+}
+
+// ── 6b. Import Tasks dialog — source picker ────────────────────────────────
+// Mirrors ImportPanel.tsx's "source" step: two source cards (Excel/CSV,
+// Microsoft Planner) plus the step indicator and footer. Excel/CSV is shown
+// selected with a file already dropped, since that's the path that also
+// covers MS Project, Asana, Monday.com, Jira, etc. (anything that exports to
+// Excel/CSV) — there is no separate picker button per external tool.
+function importSourceDialogPage() {
+  const svg = ganttSVG();
+  const steps = ['Source', 'Map', 'Import', 'Done'];
+  const activeIdx = 0;
+
+  const stepBar = steps.map((label, i) => {
+    const state = i < activeIdx ? 'done' : i === activeIdx ? 'active' : 'pending';
+    const circleBg = state === 'done' ? '#107C10' : state === 'active' ? PROJECT.color : '#EDEBE9';
+    const circleColor = state === 'pending' ? '#8A8886' : '#fff';
+    const labelColor = state === 'pending' ? '#8A8886' : '#323130';
+    const connector = i < steps.length - 1
+      ? `<div style="flex:1;height:2px;background:${state === 'done' ? '#107C10' : '#EDEBE9'};margin:0 8px 22px;"></div>`
+      : '';
+    return `
+      <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <div style="width:28px;height:28px;border-radius:50%;background:${circleBg};color:${circleColor};
+          display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;">${state === 'done' ? '✓' : i + 1}</div>
+        <span style="font-size:11px;font-weight:${state === 'active' ? 700 : 400};color:${labelColor};white-space:nowrap;">${label}</span>
+      </div>
+      ${connector}`;
+  }).join('');
+
+  // Side panel is a normal flex item with an explicit height (matching the
+  // pattern already used by panelShell()/taskPanelPage() elsewhere in this
+  // file), not absolutely positioned — safer to size correctly than an
+  // overlay/scrim approach, and consistent with how every other panel
+  // screenshot in this generator is built.
+  return page(`
+    ${toolbar('gantt')}
+    <div style="display:flex;position:relative;overflow:hidden;">
+      <div style="flex:1;overflow:auto;">${svg}</div>
+      <div style="width:640px;flex-shrink:0;border-left:1px solid #EDEBE9;background:#fff;
+        height:740px;display:flex;flex-direction:column;">
+
+        <div style="padding:18px 24px;border-bottom:1px solid #EDEBE9;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+          <span style="font-size:16px;font-weight:700;color:#323130;">Import Tasks into "${PROJECT.title}"</span>
+          <button style="border:none;background:none;font-size:18px;color:#605E5C;cursor:pointer;">✕</button>
+        </div>
+
+        <div style="padding:20px 24px;overflow:auto;flex:1;">
+          <div style="display:flex;align-items:flex-start;margin-bottom:26px;">${stepBar}</div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px;">
+            <div style="border:2px solid ${PROJECT.color};border-radius:8px;padding:20px 16px;text-align:center;cursor:pointer;background:#EFF6FC;">
+              <div style="font-size:30px;margin-bottom:8px;">📊</div>
+              <div style="font-size:14px;font-weight:700;color:#323130;margin-bottom:4px;">Excel / CSV</div>
+              <div style="font-size:12px;color:#605E5C;line-height:1.4;">Upload .xlsx, .xls, or .csv — including exports from MS Project Desktop</div>
+            </div>
+            <div style="border:1px solid #EDEBE9;border-radius:8px;padding:20px 16px;text-align:center;cursor:pointer;">
+              <div style="font-size:30px;margin-bottom:8px;">📋</div>
+              <div style="font-size:14px;font-weight:700;color:#323130;margin-bottom:4px;">Microsoft Planner</div>
+              <div style="font-size:12px;color:#605E5C;line-height:1.4;">Import tasks directly from any Planner plan in your Microsoft 365 account</div>
+            </div>
+          </div>
+
+          <div style="border:2px dashed ${PROJECT.color};border-radius:8px;padding:28px;text-align:center;background:#FAFDFF;">
+            <div style="font-size:26px;margin-bottom:6px;">✅</div>
+            <div style="font-size:14px;color:#323130;"><strong>Website-Rollout-Tasks.xlsx</strong></div>
+            <div style="font-size:12px;color:#605E5C;margin-top:4px;">20 rows · 9 columns — click to change</div>
+          </div>
+
+          <div style="margin-top:16px;display:flex;align-items:center;gap:8px;">
+            <span style="font-size:22px;font-weight:700;color:${PROJECT.color};">20</span>
+            <span style="font-size:13px;color:#605E5C;">tasks found in Website-Rollout-Tasks.xlsx</span>
+          </div>
+        </div>
+
+        <div style="padding:16px 24px;border-top:1px solid #EDEBE9;display:flex;gap:10px;flex-shrink:0;">
+          <button class="btn btn-primary">Next: Map Columns →</button>
+          <button class="btn btn-secondary">Cancel</button>
+        </div>
+      </div>
+    </div>
+  `);
+}
+
+// ── 6c. Milestone tagged on the Gantt timeline ─────────────────────────────
+// A focused, zoomed-in crop around a milestone diamond with its hover
+// tooltip open, mirroring the real tooltip content/structure in GanttChart.tsx
+// (title, date, status + priority, % complete, health badge, phase — no
+// assignee row since milestones here are unassigned) and its dark #1B1B3A
+// styling from GanttChart.module.scss.
+function milestoneZoomPage() {
+  const D = 26; // wider per-day spacing than the full gantt, for a clear close-up
+  const LW = 260, RH = 52, BH = 30;
+  const range0 = new Date('2026-06-20');
+  const days = (d) => Math.round((d - range0) / 86400000);
+
+  const rows = [
+    { title: 'Visual Design', status: 'Not Started', pct: 0, start: '2026-06-10', end: '2026-06-24', priority: 'Medium' },
+    { title: 'Design Review', status: 'Not Started', pct: 0, start: '2026-06-27', end: '2026-06-27', priority: 'High', milestone: true, phase: 'Design' },
+    { title: 'Frontend Build', status: 'Not Started', pct: 0, start: '2026-06-26', end: '2026-07-17', priority: 'Medium' },
+  ];
+  const totalDays = days(new Date('2026-07-04')) + 1;
+  const TW = totalDays * D;
+  const W = LW + TW;
+  const bodyH = rows.length * RH + 16;
+  const HH = 34;
+  const H = HH + bodyH;
+
+  const bars = [];
+  let milestoneCx = 0, milestoneCy = 0;
+  rows.forEach((t, i) => {
+    const y0 = HH + i * RH;
+    const sc = STATUS_COLOR[t.status];
+    bars.push(
+      `<rect x="0" y="${y0}" width="${LW}" height="${RH}" fill="${i % 2 === 0 ? '#FFFFFF' : '#FAFAFA'}"/>`,
+      `<line x1="0" y1="${y0 + RH}" x2="${W}" y2="${y0 + RH}" stroke="#F3F2F1" stroke-width="1"/>`,
+      `<circle cx="10" cy="${y0 + RH / 2}" r="4" fill="${sc}"/>`,
+      `<text x="22" y="${y0 + RH / 2 + 4}" font-size="13" fill="#323130" font-family="Segoe UI,sans-serif">${t.milestone ? '◆ ' : ''}${t.title}</text>`,
+    );
+    const s = new Date(t.start), e = new Date(t.end);
+    const bx = LW + days(s) * D;
+    const by = y0 + (RH - BH) / 2;
+    if (t.milestone) {
+      const ms = 13;
+      const mx = bx + D / 2, my = y0 + RH / 2;
+      milestoneCx = mx; milestoneCy = my;
+      bars.push(`<polygon points="${mx},${my - ms} ${mx + ms},${my} ${mx},${my + ms} ${mx - ms},${my}" fill="${sc}" stroke="#D13438" stroke-width="2"/>`);
+    } else {
+      const bw = Math.max(10, (days(e) - days(s) + 1) * D);
+      bars.push(`<rect x="${bx}" y="${by}" width="${bw}" height="${BH}" rx="4" fill="${sc}28"/>`);
+    }
+  });
+
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" style="background:white;font-family:'Segoe UI',Arial,sans-serif">
+    <rect y="0" width="${LW}" height="${HH}" fill="#1B1B3A"/>
+    <rect x="${LW}" y="0" width="${TW}" height="${HH}" fill="#1B1B3A"/>
+    <text x="16" y="${HH / 2 + 4}" font-size="11" font-weight="600" fill="rgba(255,255,255,0.55)" letter-spacing="0.5" font-family="Segoe UI,sans-serif">TASK NAME</text>
+    ${(() => {
+      let out = '';
+      for (let d = 0; d < totalDays; d += 1) {
+        const dt = new Date(range0); dt.setDate(range0.getDate() + d);
+        if (dt.getDate() % 7 === 0 || d === 0) {
+          out += `<text x="${LW + d * D + 4}" y="${HH - 10}" font-size="10" fill="rgba(255,255,255,0.6)" font-family="Segoe UI,sans-serif">${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</text>`;
+        }
+      }
+      return out;
+    })()}
+    <rect y="${HH}" width="${W}" height="${bodyH}" fill="white"/>
+    ${bars.join('\n    ')}
+  </svg>`;
+
+  // Tooltip — matches GanttChart.tsx's real content order and
+  // GanttChart.module.scss's .tooltip styling (#1B1B3A bg, white text, 6px
+  // radius). Positioned below-right of the diamond (mirroring the real
+  // component's cursor-relative placement) within an explicitly-sized canvas
+  // — absolutely-positioned children don't grow a shrink-to-fit parent, and
+  // .webpart clips at its own box, so an implicit canvas size would risk
+  // silently cropping the tooltip out of the screenshot.
+  const TOOLTIP_W = 240, TOOLTIP_H = 150;
+  const health = 'on-track';
+  const tooltipLeft = milestoneCx + 15;
+  const tooltipTop = milestoneCy + 10;
+  const tooltip = `
+    <div style="position:absolute;left:${tooltipLeft}px;top:${tooltipTop}px;
+      background:#1B1B3A;color:#fff;border-radius:6px;padding:10px 14px;font-size:12px;
+      pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,0.3);width:${TOOLTIP_W}px;box-sizing:border-box;line-height:1.6;">
+      <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Design Review</div>
+      <div style="display:flex;gap:6px;align-items:center;color:rgba(255,255,255,0.8);">
+        <span>📅</span><span>Jun 27, 2026 → Jun 27, 2026</span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;color:rgba(255,255,255,0.8);">
+        <span style="width:8px;height:8px;border-radius:50%;background:${STATUS_COLOR['Not Started']};display:inline-block;flex-shrink:0;"></span>
+        <span>Not Started</span><span style="margin-left:4px;">▪</span><span>High</span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;color:rgba(255,255,255,0.8);">
+        <span>⬛</span><span>0% complete</span>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;">${healthBadge(health, 'md')}</div>
+      <div style="display:flex;gap:6px;align-items:center;color:rgba(255,255,255,0.8);">
+        <span>🏷</span><span>Design</span>
+      </div>
+    </div>`;
+
+  const CANVAS_W = Math.max(W, tooltipLeft + TOOLTIP_W + 20);
+  const CANVAS_H = Math.max(H, tooltipTop + TOOLTIP_H + 12);
+
+  return page(`
+    <div style="position:relative;width:${CANVAS_W}px;height:${CANVAS_H}px;">
+      <div style="position:absolute;top:0;left:0;">${svg}</div>
+      ${tooltip}
     </div>
   `);
 }
@@ -1189,14 +1470,17 @@ async function main() {
 
   const shots = [
     ['screenshot-portfolio.png',          portfolioPage,          { width:1440, height:860 }],
-    ['screenshot-gantt.png',              ganttPage,              { width:1440, height:780 }],
-    ['screenshot-list.png',               listPage,               { width:1440, height:680 }],
-    ['screenshot-kanban.png',             kanbanPage,             { width:1440, height:800 }],
-    ['screenshot-task-panel.png',         taskPanelPage,          { width:1440, height:820 }],
-    ['screenshot-task-panel-details.png', taskPanelDetailsPage,   { width:1440, height:820 }],
-    ['screenshot-task-panel-links.png',   taskPanelLinksPage,     { width:1440, height:820 }],
-    ['screenshot-display-settings.png',   displaySettingsPage,    { width:1440, height:840 }],
-    ['screenshot-export-menu.png',        exportMenuPage,         { width:1440, height:560 }],
+    ['screenshot-gantt.png',              ganttPage,              { width:1440, height:825 }],
+    ['screenshot-list.png',               listPage,               { width:1440, height:725 }],
+    ['screenshot-filter-bar.png',         filterActivePage,       { width:1440, height:725 }],
+    ['screenshot-kanban.png',             kanbanPage,             { width:1440, height:865 }],
+    ['screenshot-task-panel.png',         taskPanelPage,          { width:1440, height:865 }],
+    ['screenshot-task-panel-details.png', taskPanelDetailsPage,   { width:1440, height:865 }],
+    ['screenshot-task-panel-links.png',   taskPanelLinksPage,     { width:1440, height:865 }],
+    ['screenshot-display-settings.png',   displaySettingsPage,    { width:1440, height:1000 }],
+    ['screenshot-export-menu.png',        exportMenuPage,         { width:1440, height:605 }],
+    ['screenshot-import-dialog.png',      importSourceDialogPage, { width:1440, height:865 }],
+    ['screenshot-milestone.png',          milestoneZoomPage,      { width:820,  height:360 }],
     ['screenshot-pptx-export.png',        pptxPreviewPage,        { width:1360, height:2480 }],
   ];
 
