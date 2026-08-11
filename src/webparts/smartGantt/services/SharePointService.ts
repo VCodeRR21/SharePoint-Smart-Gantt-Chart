@@ -251,6 +251,12 @@ export class SharePointService {
     queue(list.fields.addText('HRCompArea', { MaxLength: 255 }));
     queue(list.fields.addChoice('HREffort', { Choices: ['0', '1', '2', '3'] }));
 
+    // Aggregated fields for parent tasks (for dashboards)
+    queue(list.fields.addNumber('AvgBusEffort'));
+    queue(list.fields.addNumber('AvgBusImpact'));
+    queue(list.fields.addNumber('AvgHREffort'));
+    queue(list.fields.addNumber('OverallScore'));
+
     await execute();
 
     await this._setupTaskListViews(listName);
@@ -259,45 +265,70 @@ export class SharePointService {
   // ─── Tasks ────────────────────────────────────────────────────────────────
 
   async getProjectTasks(listName: string): Promise<ITask[]> {
+    // Fetch without custom fields first - we'll add them if they exist
     const items = await this.sp.web.lists
       .getByTitle(listName)
       .items.select(
         'Id', 'Title', 'TaskDescription', 'StartDate', 'DueDate', 'Status', 'Priority',
         'AssignedToName', 'AssignedToEmail', 'PercentComplete', 'ParentTaskId', 'Dependencies',
         'Notes', 'TaskColor', 'SortOrder', 'IsMilestone', 'Phase', 'Created', 'Modified',
-        'BusEffort', 'BusImpact', 'HRCompArea', 'HREffort'
+        'AvgBusEffort', 'AvgBusImpact', 'AvgHREffort', 'OverallScore'
       )
       .getAll();
 
+    // Try to fetch custom fields separately if they exist
+    let customFieldData: any = {};
+    try {
+      const customItems = await this.sp.web.lists
+        .getByTitle(listName)
+        .items.select('Id', 'BusEffort', 'BusImpact', 'HRCompArea', 'HREffort')
+        .getAll();
+      // Map custom fields by ID for lookup
+      customItems.forEach(item => {
+        customFieldData[item.Id] = item;
+      });
+    } catch (e) {
+      // Custom fields don't exist yet - that's ok, they're optional
+      console.log('[SmartGantt] Custom fields not found (first deployment), will be created on next save');
+    }
+
     return items
-      .map(item => ({
-        id: item.Id,
-        title: item.Title,
-        description: item.TaskDescription || '',
-        startDate: toDateOnly(item.StartDate),
-        dueDate: toDateOnly(item.DueDate),
-        status: (item.Status || 'Not Started') as TaskStatus,
-        priority: (item.Priority || 'Medium') as TaskPriority,
-        assignedTo: item.AssignedToName || '',
-        assignedToEmail: item.AssignedToEmail || '',
-        percentComplete: item.PercentComplete || 0,
-        parentTaskId: item.ParentTaskId || null,
-        dependencies: item.Dependencies
-          ? item.Dependencies.split(',').map(Number).filter(Boolean)
-          : [],
-        notes: item.Notes || '',
-        color: item.TaskColor || '',
-        sortOrder: item.SortOrder || 0,
-        isMilestone: item.IsMilestone === true || item.IsMilestone === 1,
-        phase: item.Phase || '',
-        created: item.Created,
-        modified: item.Modified,
-        busEffort: item.BusEffort || '',
-        busImpact: item.BusImpact || '',
-        hrCompArea: item.HRCompArea || '',
-        hrEffort: item.HREffort || '',
-      }))
-      .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
+      .map(item => {
+        const custom = customFieldData[item.Id] || {};
+        return {
+          id: item.Id,
+          title: item.Title,
+          description: item.TaskDescription || '',
+          startDate: toDateOnly(item.StartDate),
+          dueDate: toDateOnly(item.DueDate),
+          status: (item.Status || 'Not Started') as TaskStatus,
+          priority: (item.Priority || 'Medium') as TaskPriority,
+          assignedTo: item.AssignedToName || '',
+          assignedToEmail: item.AssignedToEmail || '',
+          percentComplete: item.PercentComplete || 0,
+          parentTaskId: item.ParentTaskId || null,
+          dependencies: item.Dependencies
+            ? item.Dependencies.split(',').map(Number).filter(Boolean)
+            : [],
+          notes: item.Notes || '',
+          color: item.TaskColor || '',
+          sortOrder: item.SortOrder || 0,
+          isMilestone: item.IsMilestone === true || item.IsMilestone === 1,
+          phase: item.Phase || '',
+          created: item.Created,
+          modified: item.Modified,
+          busEffort: custom.BusEffort || '',
+          busImpact: custom.BusImpact || '',
+          hrCompArea: custom.HRCompArea || '',
+          hrEffort: custom.HREffort || '',
+          // Aggregated values (may be present on parent tasks)
+          avgBusEffort: item.AvgBusEffort !== undefined ? item.AvgBusEffort : null,
+          avgBusImpact: item.AvgBusImpact !== undefined ? item.AvgBusImpact : null,
+          avgHrEffort: item.AvgHREffort !== undefined ? item.AvgHREffort : null,
+          overallScore: item.OverallScore !== undefined ? item.OverallScore : null,
+        };
+        })
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
   }
 
   async getProjectTaskStats(project: IProject): Promise<IProjectTaskStats> {
@@ -412,6 +443,15 @@ export class SharePointService {
       HREffort: task.hrEffort || '',
     });
 
+    // Recalculate parent aggregates if this task is a sub-task
+    try {
+      if (task.parentTaskId && Number(task.parentTaskId) > 0) {
+        await this._recalculateParentAggregates(listName, Number(task.parentTaskId));
+      }
+    } catch (e) {
+      console.warn('[SmartGantt] Aggregate recalculation error (create):', e);
+    }
+
     return {
       id: result.data.Id,
       title: task.title || 'New Task',
@@ -440,6 +480,16 @@ export class SharePointService {
   }
 
   async updateTask(listName: string, id: number, updates: Partial<ITask>): Promise<void> {
+    const list = this.sp.web.lists.getByTitle(listName);
+    // Read existing parent so we can recalc both old and new parents if changed
+    let previousParent = 0;
+    try {
+      const existing = await list.items.getById(id).select('ParentTaskId')();
+      previousParent = existing.ParentTaskId || 0;
+    } catch (e) {
+      // ignore
+    }
+
     const data: Record<string, unknown> = {};
     if (updates.title !== undefined) data.Title = updates.title;
     if (updates.description !== undefined) data.TaskDescription = updates.description;
@@ -461,11 +511,39 @@ export class SharePointService {
     if (updates.busImpact !== undefined) data.BusImpact = updates.busImpact;
     if (updates.hrCompArea !== undefined) data.HRCompArea = updates.hrCompArea;
     if (updates.hrEffort !== undefined) data.HREffort = updates.hrEffort;
-    await this.sp.web.lists.getByTitle(listName).items.getById(id).update(data);
+
+    await list.items.getById(id).update(data);
+
+    // Recalculate aggregates for relevant parents
+    try {
+      const newParent = updates.parentTaskId !== undefined ? (updates.parentTaskId || 0) : previousParent;
+      if (previousParent && Number(previousParent) > 0) {
+        await this._recalculateParentAggregates(listName, Number(previousParent));
+      }
+      if (newParent && Number(newParent) > 0 && Number(newParent) !== Number(previousParent)) {
+        await this._recalculateParentAggregates(listName, Number(newParent));
+      }
+      // If numeric fields changed but parent didn't, ensure that parent is recalculated
+      if ((updates.busEffort !== undefined || updates.busImpact !== undefined || updates.hrEffort !== undefined) && (!newParent || Number(newParent) > 0)) {
+        const parentToUse = newParent || previousParent;
+        if (parentToUse && Number(parentToUse) > 0) await this._recalculateParentAggregates(listName, Number(parentToUse));
+      }
+    } catch (e) {
+      console.warn('[SmartGantt] Aggregate recalculation error (update):', e);
+    }
   }
 
   async deleteTask(listName: string, id: number): Promise<void> {
     const list = this.sp.web.lists.getByTitle(listName);
+
+    // Read existing parent for aggregate recalculation after delete
+    let previousParent = 0;
+    try {
+      const existing = await list.items.getById(id).select('ParentTaskId')();
+      previousParent = existing.ParentTaskId || 0;
+    } catch (e) {
+      // ignore
+    }
 
     // Promote sub-tasks to top level first, so they don't become invisible
     // orphans (views only render sub-tasks under an existing parent).
@@ -486,6 +564,55 @@ export class SharePointService {
 
     // Recycle (not delete) so the task can be restored from the recycle bin.
     await list.items.getById(id).recycle();
+
+    // Recalculate aggregates for previous parent
+    try {
+      if (previousParent && Number(previousParent) > 0) {
+        await this._recalculateParentAggregates(listName, Number(previousParent));
+      }
+    } catch (e) {
+      console.warn('[SmartGantt] Aggregate recalculation error (delete):', e);
+    }
+  }
+
+  // Recalculate aggregated numeric metrics for a parent task
+  private async _recalculateParentAggregates(listName: string, parentId: number): Promise<void> {
+    if (!parentId || parentId <= 0) return;
+    try {
+      const list = this.sp.web.lists.getByTitle(listName);
+      const children = await list.items.select('BusEffort', 'BusImpact', 'HREffort').filter(`ParentTaskId eq ${parentId}`).getAll();
+      const nums = (field: string) => children
+        .map(c => {
+          const v = (c as any)[field];
+          const n = v === undefined || v === null || v === '' ? NaN : Number(v);
+          return Number.isFinite(n) ? n : NaN;
+        })
+        .filter(n => Number.isFinite(n));
+
+      const be = nums('BusEffort');
+      const bi = nums('BusImpact');
+      const he = nums('HREffort');
+
+      const avg = (arr: number[]) => arr.length ? parseFloat((arr.reduce((s, x) => s + x, 0) / arr.length).toFixed(1)) : null;
+      const avgBe = avg(be);
+      const avgBi = avg(bi);
+      const avgHe = avg(he);
+
+      // Overall score: simple mean of available averages
+      const available = [avgBe, avgBi, avgHe].filter(v => v !== null) as number[];
+      const overall = available.length ? parseFloat((available.reduce((s, x) => s + x, 0) / available.length).toFixed(1)) : null;
+
+      const updateData: Record<string, unknown> = {
+        AvgBusEffort: avgBe,
+        AvgBusImpact: avgBi,
+        AvgHREffort: avgHe,
+        OverallScore: overall,
+      };
+
+      await list.items.getById(parentId).update(updateData);
+    } catch (e) {
+      console.warn('[SmartGantt] Failed to recalculate aggregates for parent', parentId, e);
+    }
   }
 
   // ─── List naming ──────────────────────────────────────────────────────────

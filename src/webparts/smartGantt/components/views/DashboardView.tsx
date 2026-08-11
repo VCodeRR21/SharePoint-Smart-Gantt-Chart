@@ -292,6 +292,37 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
         </div>
       </div>
 
+      {/* ── Aggregated task metrics (top-level tasks) ─────────────────────── */}
+      {(() => {
+        const topLevel = tasks.filter(t => !t.parentTaskId);
+        if (topLevel.length === 0) return null;
+        return (
+          <div style={{ background: '#fff', borderRadius: 8, border: '1px solid #EDEBE9', padding: '16px 20px', marginBottom: 16 }}>
+            <SectionHeader title="Top-level task averages" />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {topLevel.map(t => (
+                <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #F3F2F1' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: '#323130', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                    <div style={{ fontSize: 11, color: '#605E5C', marginTop: 4 }}>
+                      <span>Avg Bus Effort: <strong>{t.avgBusEffort !== null && t.avgBusEffort !== undefined ? t.avgBusEffort : 'N/A'}</strong></span>
+                      <span style={{ marginLeft: 12 }}>Avg Bus Impact: <strong>{t.avgBusImpact !== null && t.avgBusImpact !== undefined ? t.avgBusImpact : 'N/A'}</strong></span>
+                      <span style={{ marginLeft: 12 }}>Avg HR Effort: <strong>{t.avgHrEffort !== null && t.avgHrEffort !== undefined ? t.avgHrEffort : 'N/A'}</strong></span>
+                      {t.overallScore !== null && t.overallScore !== undefined && (
+                        <span style={{ marginLeft: 12 }}>Overall: <strong>{t.overallScore}</strong></span>
+                      )}
+                    </div>
+                  </div>
+                  <div style={{ marginLeft: 12 }}>
+                    <button onClick={() => onEditTask(t)} style={{ background: project.color, color: '#fff', border: 'none', padding: '6px 10px', borderRadius: 4, cursor: 'pointer' }}>Edit</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ── Overdue + Upcoming ──────────────────────────────────────────── */}
       {(overdue.length > 0 || upcoming.length > 0) && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>

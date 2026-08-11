@@ -44,7 +44,7 @@ export default class SmartGanttWebPart extends BaseClientSideWebPart<ISmartGantt
     ReactDom.unmountComponentAtNode(this.domElement);
   }
 
-  protected get dataVersion(): Version {
+  protected get dataVersion(): any {
     return Version.parse('1.0');
   }
 

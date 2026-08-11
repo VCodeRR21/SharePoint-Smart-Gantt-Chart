@@ -19,8 +19,8 @@
     "@fluentui/react": "8.125.6",
     "@microsoft/sp-core-library": "1.20.0",
     "@microsoft/sp-lodash-subset": "1.20.0",
-    "@microsoft/sp-property-pane": "1.20.0",
-    "@microsoft/sp-webpart-base": "1.20.0",
+    "@microsoft/sp-property-pane": "^1.23.2",
+    "@microsoft/sp-webpart-base": "^1.23.2",
     "@pnp/core": "3.26.0",
     "@pnp/sp": "3.26.0",
     "date-fns": "2.30.0",
@@ -31,17 +31,17 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
-    "@microsoft/eslint-config-spfx": "1.20.2",
+    "@microsoft/eslint-config-spfx": "^1.23.2",
     "@microsoft/eslint-plugin-spfx": "1.20.2",
     "@microsoft/rush-stack-compiler-4.7": "0.1.1",
-    "@microsoft/sp-build-web": "1.20.2",
+    "@microsoft/sp-build-web": "^1.23.2",
     "@microsoft/sp-module-interfaces": "1.20.2",
     "@rushstack/eslint-config": "4.6.4",
     "@types/react": "17.0.45",
     "@types/react-dom": "17.0.17",
     "@types/webpack-env": "1.15.2",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "gulp": "4.0.2",
+    "gulp": "^5.0.1",
     "playwright": "^1.60.0",
     "puppeteer-core": "^24.43.1"
   }

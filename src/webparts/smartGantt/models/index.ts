@@ -40,6 +40,11 @@ export interface ITask {
   busImpact?: string;
   hrCompArea?: string;
   hrEffort?: string;
+  // Aggregated/persisted metrics (parent task fields)
+  avgBusEffort?: number | null;
+  avgBusImpact?: number | null;
+  avgHrEffort?: number | null;
+  overallScore?: number | null;
 }
 
 export type TaskStatus = 'Not Started' | 'In Progress' | 'Completed' | 'On Hold' | 'Cancelled';
