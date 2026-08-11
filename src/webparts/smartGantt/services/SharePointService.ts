@@ -277,7 +277,7 @@ export class SharePointService {
       .getAll();
 
     // Try to fetch custom fields separately if they exist
-    let customFieldData: any = {};
+    const customFieldData: any = {};
     try {
       const customItems = await this.sp.web.lists
         .getByTitle(listName)
@@ -287,7 +287,7 @@ export class SharePointService {
       customItems.forEach(item => {
         customFieldData[item.Id] = item;
       });
-    } catch (e) {
+    } catch (_e) {
       // Custom fields don't exist yet - that's ok, they're optional
       console.log('[SmartGantt] Custom fields not found (first deployment), will be created on next save');
     }
@@ -486,7 +486,7 @@ export class SharePointService {
     try {
       const existing = await list.items.getById(id).select('ParentTaskId')();
       previousParent = existing.ParentTaskId || 0;
-    } catch (e) {
+    } catch (_e) {
       // ignore
     }
 
@@ -541,7 +541,7 @@ export class SharePointService {
     try {
       const existing = await list.items.getById(id).select('ParentTaskId')();
       previousParent = existing.ParentTaskId || 0;
-    } catch (e) {
+    } catch (_e) {
       // ignore
     }
 
