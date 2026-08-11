@@ -26,6 +26,9 @@ interface IGanttChartProps {
   onTaskUpdate: (id: number, updates: Partial<ITask>) => void;
   onAddTask: () => void;
   onImport?: () => void;
+  // Expand/collapse support (client-only)
+  expandedTopLevelIds?: Set<number>;
+  onToggleExpand?: (id: number) => void;
 }
 
 type DragMode = 'move' | 'resize-start' | 'resize-end';
@@ -93,6 +96,8 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
   onTaskUpdate,
   onAddTask,
   onImport,
+  expandedTopLevelIds,
+  onToggleExpand,
 }) => {
   const bodyScrollRef = React.useRef<HTMLDivElement>(null);
   const headerScrollRef = React.useRef<HTMLDivElement>(null);
@@ -112,6 +117,8 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
   const suppressClickRef = React.useRef(false);
   const [tooltip, setTooltip] = React.useState<ITooltip | null>(null);
   const [collapsedPhases, setCollapsedPhases] = React.useState<Set<string>>(new Set());
+  // receive expanded top-level IDs from parent (client-only)
+  // expandedTopLevelIds and onToggleExpand are destructured from props above
   // Tracks whether the previous render had scrollToToday=true, so the
   // false-reset 100ms later doesn't override the Today scroll with the
   // smart-initial-position logic.
@@ -168,7 +175,7 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
 
   const totalDays = differenceInCalendarDays(rangeEnd, rangeStart) + 1;
   const svgWidth = totalDays * dayWidth;
-  const visibleTasks = buildVisibleRows(tasks, collapsedPhases);
+  const visibleTasks = buildVisibleRows(tasks, collapsedPhases, expandedTopLevelIds);
   const svgBodyHeight = visibleTasks.length * ROW_H;
 
   // Convert date ↔ x
@@ -653,6 +660,16 @@ export const GanttChart: React.FC<IGanttChartProps> = ({
           style={{ height: ROW_H }}
         >
           {isChild && <div className={styles.taskIndent} />}
+          {!isChild && (
+            <button
+              className={styles.taskExpandBtn}
+              aria-label={`${expandedTopLevelIds && !expandedTopLevelIds.has(task.id) ? 'Expand' : 'Collapse'} task ${task.title}`}
+              aria-expanded={!(expandedTopLevelIds && !expandedTopLevelIds.has(task.id))}
+              onClick={e => { e.stopPropagation(); onToggleExpand && onToggleExpand(task.id); }}
+            >
+              {expandedTopLevelIds && !expandedTopLevelIds.has(task.id) ? '▶' : '▼'}
+            </button>
+          )}
           <div
             className={styles.taskStatusDot}
             style={{ background: getTaskColor(task, settings) }}
@@ -1009,7 +1026,7 @@ interface IVisibleRow {
   isChild?: boolean;
 }
 
-function buildVisibleRows(tasks: ITask[], collapsedPhases: Set<string>): IVisibleRow[] {
+function buildVisibleRows(tasks: ITask[], collapsedPhases: Set<string>, expandedTopLevelIds?: Set<number>): IVisibleRow[] {
   const rows: IVisibleRow[] = [];
   const ids = new Set(tasks.map(t => t.id));
   // A task only renders as a sub-task if its parent is actually present;
@@ -1040,7 +1057,10 @@ function buildVisibleRows(tasks: ITask[], collapsedPhases: Set<string>): IVisibl
     rows.push({ type: 'task', task, isChild: false });
     const children = subtaskMap.get(task.id);
     if (children) {
-      children.forEach(c => rows.push({ type: 'task', task: c, isChild: true }));
+      const expanded = !expandedTopLevelIds || expandedTopLevelIds.has(task.id);
+      if (expanded) {
+        children.forEach(c => rows.push({ type: 'task', task: c, isChild: true }));
+      }
     }
   };
 

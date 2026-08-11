@@ -45,6 +45,8 @@ export interface ITask {
   avgBusImpact?: number | null;
   avgHrEffort?: number | null;
   overallScore?: number | null;
+  // Client-side UI preference persisted optionally to SharePoint
+  isCollapsed?: boolean;
 }
 
 export type TaskStatus = 'Not Started' | 'In Progress' | 'Completed' | 'On Hold' | 'Cancelled';

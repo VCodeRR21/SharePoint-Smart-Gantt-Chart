@@ -242,7 +242,8 @@ export class SharePointService {
     queue(list.fields.addText('TaskColor', { MaxLength: 20 }));
     queue(list.fields.addNumber('SortOrder'));
     queue(list.fields.add('IsMilestone', 8));
-    queue(list.fields.addText('Phase', { MaxLength: 100 }));
+    // Phase as a Choice field to enforce predefined values
+    queue(list.fields.addChoice('Phase', { Choices: ['Discovery', 'Planning', 'Executing', 'Closed'] }));
     queue(list.fields.addText('AssignedToName', { MaxLength: 255 }));
     queue(list.fields.addText('AssignedToEmail', { MaxLength: 255 }));
     // Custom fields for task customization
@@ -257,6 +258,9 @@ export class SharePointService {
     queue(list.fields.addNumber('AvgHREffort'));
     queue(list.fields.addNumber('OverallScore'));
 
+    // Optional persisted UI state for expand/collapse
+    queue(list.fields.add('IsCollapsed', 8));
+
     await execute();
 
     await this._setupTaskListViews(listName);
@@ -264,7 +268,91 @@ export class SharePointService {
 
   // ─── Tasks ────────────────────────────────────────────────────────────────
 
+  /**
+   * Best-effort migration: convert an existing Text 'Phase' field to a Choice field.
+   * Strategy:
+   * - Read all distinct Phase text values appearing in items.
+   * - Create a temporary choice field 'Phase_migration_tmp' containing the union of
+   *   default choices and observed values.
+   * - Copy values from old text 'Phase' into the temp choice field for each item.
+   * - Remove the old 'Phase' field and recreate it as a Choice with the same choices.
+   * - Copy values from temp field back into newly created 'Phase' choice, then delete temp.
+   * This is conservative and runs as a background best-effort operation; failures are logged.
+   */
+  async migratePhaseField(listName: string, preferredChoices: string[] = ['Discovery', 'Planning', 'Executing', 'Closed']): Promise<void> {
+    const list = this.sp.web.lists.getByTitle(listName);
+    const tmpFieldName = 'Phase_migration_tmp';
+    try {
+      // Read distinct existing phase values
+      const all = await list.items.select('Id', 'Phase').getAll();
+      const observed = new Set<string>();
+      all.forEach((it: any) => { if (it.Phase) observed.add(String(it.Phase)); });
+      const choices = Array.from(new Set([...preferredChoices, ...Array.from(observed)])).filter(Boolean);
+
+      // Create temporary choice field
+      try { await list.fields.addChoice(tmpFieldName, { Choices: choices }); } catch (_e) {
+              console.warn('[SmartGantt] Could not add temporary phase field');
+      }
+
+      // Copy values into temp field in small batches
+      const batchSize = 50;
+      for (let i = 0; i < all.length; i += batchSize) {
+        const chunk = all.slice(i, i + batchSize);
+        await Promise.all(chunk.map(async (it: any) => {
+          const val = it.Phase ? String(it.Phase) : '';
+          try {
+            await list.items.getById(it.Id).update({ [tmpFieldName]: val });
+          } catch (_e) {
+            // ignore individual update failures
+          }
+        }));
+      }
+
+      // Remove old Phase field (text)
+      try {
+        const old = await list.fields.getByInternalNameOrTitle('Phase')();
+        if (old) {
+          try { await list.fields.getByInternalNameOrTitle('Phase').delete(); } catch (_e) { console.warn('[SmartGantt] Failed to delete old Phase field'); }
+        }
+      } catch { /* no-op */ }
+
+      // Create new Choice 'Phase' with desired choices
+      try { await list.fields.addChoice('Phase', { Choices: choices }); } catch (_e) { console.warn('[SmartGantt] Failed to add new Phase choice field'); }
+
+      // Copy back values from temp into new Phase field
+      const allTmp = await list.items.select('Id', tmpFieldName).getAll();
+      for (let i = 0; i < allTmp.length; i += batchSize) {
+        const chunk = allTmp.slice(i, i + batchSize);
+        await Promise.all(chunk.map(async (it: any) => {
+          const val = it[tmpFieldName] ? String(it[tmpFieldName]) : '';
+                try { await list.items.getById(it.Id).update({ Phase: val }); } catch (_e) { /* ignore */ }
+        }));
+      }
+
+      // Remove temporary field
+      try { await list.fields.getByInternalNameOrTitle(tmpFieldName).delete(); } catch (_e) { /* ignore */ }
+
+      console.info('[SmartGantt] Phase migration completed for list', listName);
+    } catch (_e) {
+      console.warn('[SmartGantt] Phase migration failed');
+    }
+  }
+
   async getProjectTasks(listName: string): Promise<ITask[]> {
+    // If the existing Phase field is plain text (older deployments) attempt an automated
+    // migration to Choice so the UI can rely on a fixed set of phases. This is a best-effort
+    // operation and failures are non-fatal.
+    try {
+      const fld = await this.sp.web.lists.getByTitle(listName).fields.getByInternalNameOrTitle('Phase')();
+      const type = (fld as any).TypeAsString || (fld as any).Type || '';
+      if (String(type).toLowerCase().includes('text')) {
+        // Run migration (best-effort). Don't block task loading on failure.
+        void this.migratePhaseField(listName).catch(e => console.warn('[SmartGantt] Phase migration failed:', e));
+      }
+    } catch {
+      // Field may not exist yet; ignore
+    }
+
     // Fetch without custom fields first - we'll add them if they exist
     const items = await this.sp.web.lists
       .getByTitle(listName)
@@ -272,7 +360,7 @@ export class SharePointService {
         'Id', 'Title', 'TaskDescription', 'StartDate', 'DueDate', 'Status', 'Priority',
         'AssignedToName', 'AssignedToEmail', 'PercentComplete', 'ParentTaskId', 'Dependencies',
         'Notes', 'TaskColor', 'SortOrder', 'IsMilestone', 'Phase', 'Created', 'Modified',
-        'AvgBusEffort', 'AvgBusImpact', 'AvgHREffort', 'OverallScore'
+        'AvgBusEffort', 'AvgBusImpact', 'AvgHREffort', 'OverallScore', 'IsCollapsed'
       )
       .getAll();
 
@@ -326,6 +414,7 @@ export class SharePointService {
           avgBusImpact: item.AvgBusImpact !== undefined ? item.AvgBusImpact : null,
           avgHrEffort: item.AvgHREffort !== undefined ? item.AvgHREffort : null,
           overallScore: item.OverallScore !== undefined ? item.OverallScore : null,
+          isCollapsed: item.IsCollapsed === true || item.IsCollapsed === 1,
         };
         })
         .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id);
@@ -441,6 +530,7 @@ export class SharePointService {
       BusImpact: task.busImpact || '',
       HRCompArea: task.hrCompArea || '',
       HREffort: task.hrEffort || '',
+      IsCollapsed: task.isCollapsed || false,
     });
 
     // Recalculate parent aggregates if this task is a sub-task
@@ -511,6 +601,7 @@ export class SharePointService {
     if (updates.busImpact !== undefined) data.BusImpact = updates.busImpact;
     if (updates.hrCompArea !== undefined) data.HRCompArea = updates.hrCompArea;
     if (updates.hrEffort !== undefined) data.HREffort = updates.hrEffort;
+    if (updates.isCollapsed !== undefined) data.IsCollapsed = updates.isCollapsed;
 
     await list.items.getById(id).update(data);
 

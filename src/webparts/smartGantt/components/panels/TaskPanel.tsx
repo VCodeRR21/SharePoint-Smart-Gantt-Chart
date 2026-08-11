@@ -324,12 +324,12 @@ export const TaskPanel: React.FC<ITaskPanelProps> = ({
         {/* ── DETAILS TAB ── */}
         {activeTab === 'details' && (
           <Stack tokens={{ childrenGap: 16 }}>
-            <AutocompleteField
+            <Dropdown
               label="Phase"
-              value={form.phase || ''}
-              suggestions={knownPhases}
-              onChange={v => set('phase', v)}
-              placeholder="e.g. Discovery, Design, Development"
+              selectedKey={form.phase || ''}
+              options={Array.from(new Set([...(knownPhases || []), 'Discovery', 'Planning', 'Executing', 'Closed', form.phase || ''])).filter(Boolean).map(p => ({ key: p, text: p }))}
+              onChange={(_, opt) => opt && set('phase', opt.key as string)}
+              placeholder="Select a phase"
             />
             <div style={{ fontSize: 11, color: '#605E5C', marginTop: 4 }}>
               Groups tasks visually on the Gantt. Start typing to see existing phases.

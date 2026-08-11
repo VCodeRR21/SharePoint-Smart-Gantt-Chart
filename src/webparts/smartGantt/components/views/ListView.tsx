@@ -17,6 +17,9 @@ interface IListViewProps {
   onDeleteTask: (id: number) => void;
   onTaskUpdate: (id: number, updates: Partial<ITask>) => void;
   onAddTask: () => void;
+  // Expand/collapse controls for top-level tasks (client-side only)
+  expandedTopLevelIds?: Set<number>;
+  onToggleExpand?: (id: number) => void;
 }
 
 type SortField = 'sortOrder' | 'title' | 'startDate' | 'dueDate' | 'status' | 'priority' | 'assignedTo' | 'percentComplete' | 'phase';
@@ -42,6 +45,7 @@ function stringToColor(s: string): string {
 
 export const ListView: React.FC<IListViewProps> = ({
   tasks, showHealthBadges = true, onEditTask, onDeleteTask, onTaskUpdate, onAddTask,
+  expandedTopLevelIds, onToggleExpand,
 }) => {
   const [sortField, setSortField] = React.useState<SortField>('sortOrder');
   const [sortDir, setSortDir] = React.useState<SortDir>('asc');
@@ -115,7 +119,11 @@ export const ListView: React.FC<IListViewProps> = ({
 
     const pushTask = (t: ITask): void => {
       rows.push({ type: 'task', task: t, isChild: false });
-      (children.get(t.id) || []).sort(sortFn).forEach(c => rows.push({ type: 'task', task: c, isChild: true }));
+      const childs = (children.get(t.id) || []).sort(sortFn);
+      // Respect expand/collapse state — if this top-level task is collapsed, skip pushing children
+      if (!expandedTopLevelIds || expandedTopLevelIds.has(t.id)) {
+        childs.forEach(c => rows.push({ type: 'task', task: c, isChild: true }));
+      }
     };
 
     byPhase.forEach((pTasks, phase) => {
@@ -203,29 +211,38 @@ export const ListView: React.FC<IListViewProps> = ({
                   <td>
                     <div className={styles.taskNameCell}>
                       {isChild && <div className={styles.subtaskIndent} />}
-                      <div
-                        className={styles.statusDot}
-                        style={{ background: STATUS_COLORS[task.status] }}
-                      />
-                      {task.isMilestone && <span className={styles.milestoneIcon}>◆</span>}
-                      <span
-                        className={styles.taskName}
-                        title={task.title}
-                        onClick={() => onEditTask(task)}
-                        style={{ cursor: 'pointer' }}
-                      >
-                        {task.title}
-                      </span>
-                      {violationIds.has(task.id) && (
-                        <span
-                          title="Started before all dependencies were completed"
-                          style={{ color: '#CA5010', fontSize: 12, flexShrink: 0 }}
-                        >
-                          ⚠
-                        </span>
-                      )}
-                    </div>
-                  </td>
+                                  {!isChild && (
+                                    <button
+                                      aria-label={expandedTopLevelIds && expandedTopLevelIds.has(task.id) ? 'Collapse' : 'Expand'}
+                                      onClick={() => onToggleExpand && onToggleExpand(task.id)}
+                                      style={{ marginRight: 8, background: 'transparent', border: 'none', cursor: 'pointer' }}
+                                    >
+                                      {expandedTopLevelIds && expandedTopLevelIds.has(task.id) ? '▾' : '▸'}
+                                    </button>
+                                  )}
+                                  <div
+                                    className={styles.statusDot}
+                                    style={{ background: STATUS_COLORS[task.status] }}
+                                  />
+                                  {task.isMilestone && <span className={styles.milestoneIcon}>◆</span>}
+                                  <span
+                                    className={styles.taskName}
+                                    title={task.title}
+                                    onClick={() => onEditTask(task)}
+                                    style={{ cursor: 'pointer' }}
+                                  >
+                                    {task.title}
+                                  </span>
+                                  {violationIds.has(task.id) && (
+                                    <span
+                                      title="Started before all dependencies were completed"
+                                      style={{ color: '#CA5010', fontSize: 12, flexShrink: 0 }}
+                                    >
+                                      ⚠
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
 
                   {/* Status */}
                   <td>

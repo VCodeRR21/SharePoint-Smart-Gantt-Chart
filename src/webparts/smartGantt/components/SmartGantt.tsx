@@ -67,6 +67,8 @@ interface ISmartGanttState {
   taskFilter: ITaskFilter;
   portfolioStats: Map<number, IProjectTaskStats> | null;
   portfolioLoading: boolean;
+  // Client-side expand/collapse state for top-level tasks
+  expandedTopLevelIds?: Set<number>;
 }
 
 export default class SmartGantt extends React.Component<ISmartGanttProps, ISmartGanttState> {
@@ -106,6 +108,7 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
       taskFilter: EMPTY_TASK_FILTER,
       portfolioStats: null,
       portfolioLoading: false,
+      expandedTopLevelIds: undefined,
     };
   }
 
@@ -192,7 +195,15 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
     try {
       const tasks = await this.props.spService.getProjectTasks(listName);
       if (seq !== this._taskLoadSeq) return; // stale response — a newer load won
-      this.setState({ tasks, tasksLoading: false });
+      // Initialize expandedTopLevelIds from persisted IsCollapsed (if present).
+      const expanded = new Set<number>();
+      const ids = new Set(tasks.map(t => t.id));
+      const isSubTask = (t: ITask) => !!t.parentTaskId && ids.has(t.parentTaskId!);
+      tasks.filter(t => !isSubTask(t)).forEach(t => {
+        // If isCollapsed is explicitly true, treat as collapsed. Otherwise expanded.
+        if (!t.isCollapsed) expanded.add(t.id);
+      });
+      this.setState({ tasks, tasksLoading: false, expandedTopLevelIds: expanded });
     } catch (err) {
       if (seq !== this._taskLoadSeq) return;
       this.setState({
@@ -228,6 +239,25 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
   private _handleScrollToToday = (): void => {
     this.setState({ scrollToToday: true }, () => {
       setTimeout(() => this.setState({ scrollToToday: false }), 100);
+    });
+  };
+
+  private _handleToggleExpand = (id: number): void => {
+    const listName = this.state.selectedProject?.listName;
+    // Toggle client state first for snappy UI
+    this.setState(prev => {
+      const next = new Set(prev.expandedTopLevelIds ?? []);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return { expandedTopLevelIds: next } as Pick<ISmartGanttState, 'expandedTopLevelIds'> as ISmartGanttState;
+    });
+
+    // Persist collapsed state to SharePoint (best-effort). If no project selected, skip.
+    if (!listName) return;
+    // Determine the new collapsed value based on prior state
+    const currently = this.state.expandedTopLevelIds ?? new Set<number>();
+    const willBeCollapsed = currently.has(id); // if currently expanded, toggling will collapse
+    void this.props.spService.updateTask(listName, id, { isCollapsed: willBeCollapsed }).catch(e => {
+      console.warn('[SmartGantt] Failed to persist collapsed state:', e);
     });
   };
 
@@ -361,6 +391,11 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
     const { selectedProject, editingTask } = this.state;
     if (!selectedProject) return;
     try {
+      const DEFAULT_PHASES = ['Discovery', 'Planning', 'Executing', 'Closed'];
+      // Coerce phase to allowed choices to avoid write failures when migrating from free-text phases
+      if (data.phase && !DEFAULT_PHASES.includes(data.phase)) {
+        data.phase = '';
+      }
       if (editingTask) {
         await this.props.spService.updateTask(selectedProject.listName, editingTask.id, data);
       } else {
@@ -597,6 +632,8 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
                   onTaskUpdate={this._handleTaskUpdate}
                   onAddTask={this._handleAddTask}
                   onImport={() => this.setState({ showImportPanel: true })}
+                  expandedTopLevelIds={this.state.expandedTopLevelIds}
+                  onToggleExpand={this._handleToggleExpand}
                 />
               )}
 
@@ -619,6 +656,8 @@ export default class SmartGantt extends React.Component<ISmartGanttProps, ISmart
                   onDeleteTask={this._handleDeleteTask}
                   onTaskUpdate={this._handleTaskUpdate}
                   onAddTask={this._handleAddTask}
+                  expandedTopLevelIds={this.state.expandedTopLevelIds}
+                  onToggleExpand={this._handleToggleExpand}
                 />
               )}
 
