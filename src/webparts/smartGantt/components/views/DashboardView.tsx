@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { addDays, differenceInCalendarDays } from 'date-fns';
+import { addDays, differenceInCalendarDays, startOfMonth, subMonths } from 'date-fns';
 import {
   IProject, ITask, TaskStatus,
   STATUS_COLORS, STATUS_LIGHT_COLORS, PRIORITY_COLORS, phaseColor,
@@ -114,65 +114,78 @@ const getNumericMetric = (task: ITask, field: 'busEffort' | 'busImpact' | 'hrEff
   return Number.isFinite(value) ? value : null;
 };
 
+const getMonthSequence = (): Date[] => {
+  const anchor = startOfMonth(new Date());
+  const months: Date[] = [];
+  for (let i = 11; i >= 0; i--) {
+    months.push(subMonths(anchor, i));
+  }
+  return months;
+};
+
 const buildMonthlyTrend = (
   parentTask: ITask,
   allTasks: ITask[],
   field: 'busEffort' | 'busImpact' | 'hrEffort',
-): number[] => {
-  const end = new Date();
-  end.setDate(1);
-  end.setHours(0, 0, 0, 0);
-
-  const months: Date[] = [];
-  for (let i = 11; i >= 0; i--) {
-    months.push(new Date(end.getFullYear(), end.getMonth() - i, 1));
-  }
-
+): { month: string; value: number | null; date: Date }[] => {
+  const months = getMonthSequence();
   const children = allTasks.filter(task => task.parentTaskId === parentTask.id);
+
   return months.map(month => {
     const values = children
       .map(child => {
         const d = parseDateOnly(child.startDate) || parseDateOnly(child.dueDate);
         if (!d) return null;
-        if (d.getFullYear() !== month.getFullYear() || d.getMonth() !== month.getMonth()) return null;
-        return getNumericMetric(child, field);
+
+        const inSameMonth = d.getFullYear() === month.getFullYear() && d.getMonth() === month.getMonth();
+        return inSameMonth ? getNumericMetric(child, field) : null;
       })
       .filter((value): value is number => value !== null && Number.isFinite(value));
 
-    if (values.length === 0) return 0;
-    return values.reduce((sum, value) => sum + value, 0) / values.length;
+    const value = values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+    return {
+      month: month.toLocaleString('en-US', { month: 'short' }),
+      value,
+      date: month,
+    };
   });
 };
 
-const Sparkline: React.FC<{ values: number[]; color: string; currentValue: number | null; label: string; }> = ({ values, color, currentValue, label }) => {
-  const width = 170;
-  const height = 36;
-  const padding = 4;
-  const safeMax = Math.max(...values, 1);
-  const safeMin = Math.min(...values, 0);
-  const range = safeMax - safeMin || 1;
+const getHeatColor = (value: number | null, maxValue: number, hue: number): string => {
+  if (value === null || !Number.isFinite(value)) return '#F3F2F1';
+  if (maxValue <= 0) return `hsla(${hue}, 40%, 88%, 0.9)`;
+  const intensity = Math.min(value / maxValue, 1);
+  const lightness = 96 - (intensity * 36);
+  return `hsla(${hue}, 55%, ${lightness}%, 0.9)`;
+};
 
-  const points = values.map((value, index) => {
-    const x = padding + (index / (values.length - 1)) * (width - padding * 2);
-    const y = height - padding - ((value - safeMin) / range) * (height - padding * 2);
-    return `${x},${y}`;
-  }).join(' ');
+const MetricHeatmap: React.FC<{ label: string; color: string; values: { month: string; value: number | null; date: Date }[]; }> = ({ label, color, values }) => {
+  const maxValue = Math.max(...values.map(v => v.value ?? 0), 1);
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <div style={{ width: 72, fontSize: 10, color: '#605E5C', fontWeight: 600 }}>{label}</div>
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ flex: 1 }}>
-        <polyline
-          points={points}
-          fill="none"
-          stroke={color}
-          strokeWidth={2.5}
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
-      </svg>
-      <div style={{ width: 36, textAlign: 'right', fontSize: 10, color: '#323130', fontWeight: 700 }}>
-        {currentValue !== null && currentValue !== undefined ? currentValue.toFixed(1) : 'N/A'}
+      <div style={{ width: 68, fontSize: 10, fontWeight: 700, color: '#605E5C' }}>{label}</div>
+      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(12, minmax(18px, 1fr))', gap: 2 }}>
+        {values.map(item => (
+          <div
+            key={`${label}-${item.date.toISOString()}`}
+            title={item.value !== null ? `${item.month}: ${item.value.toFixed(1)}` : `${item.month}: no data`}
+            style={{
+              height: 24,
+              borderRadius: 3,
+              border: '1px solid rgba(0,0,0,0.04)',
+              background: getHeatColor(item.value, maxValue, color === '#0078D4' ? 210 : color === '#107C10' ? 120 : 25),
+              color: item.value !== null ? '#323130' : '#8A8886',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: 9,
+              fontWeight: 700,
+            }}
+          >
+            {item.value !== null ? item.value.toFixed(1) : ''}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -374,50 +387,48 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
           { key: 'avgHrEffort', label: 'HR Effort', color: '#CA5010', field: 'hrEffort' as const },
         ];
 
+        const monthHeaders = getMonthSequence();
+
         return (
           <div style={{ background: '#fff', borderRadius: 8, border: '1px solid #EDEBE9', padding: '16px 20px', marginBottom: 16 }}>
             <SectionHeader title="Average effort" />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {topLevel.map(t => {
-                const trendItems = metricConfigs.map(metric => ({
-                  ...metric,
-                  currentValue: t[metric.key] !== null && t[metric.key] !== undefined ? Number(t[metric.key]) : null,
-                  values: buildMonthlyTrend(t, tasks, metric.field),
-                }));
-
-                return (
-                  <div key={t.id} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, padding: '10px 0', borderBottom: '1px solid #F3F2F1' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, color: '#323130', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-                      <div style={{ fontSize: 11, color: '#605E5C', marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: '6px 12px' }}>
-                        <span>Avg Bus Effort: <strong>{t.avgBusEffort !== null && t.avgBusEffort !== undefined ? t.avgBusEffort.toFixed(1) : 'N/A'}</strong></span>
-                        <span>Avg Bus Impact: <strong>{t.avgBusImpact !== null && t.avgBusImpact !== undefined ? t.avgBusImpact.toFixed(1) : 'N/A'}</strong></span>
-                        <span>Avg HR Effort: <strong>{t.avgHrEffort !== null && t.avgHrEffort !== undefined ? t.avgHrEffort.toFixed(1) : 'N/A'}</strong></span>
-                        {t.overallScore !== null && t.overallScore !== undefined && (
-                          <span>Overall: <strong>{t.overallScore.toFixed(1)}</strong></span>
-                        )}
-                      </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 10, alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid #F3F2F1' }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#605E5C', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Top-level task</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(18px, 1fr))', gap: 2 }}>
+                  {monthHeaders.map(month => (
+                    <div key={month.toISOString()} style={{ fontSize: 9, color: '#605E5C', textAlign: 'center', fontWeight: 700 }}>
+                      {month.toLocaleString('en-US', { month: 'short' })}
                     </div>
+                  ))}
+                </div>
+              </div>
 
-                    <div style={{ width: 280, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <div style={{ fontSize: 10, color: '#605E5C', fontWeight: 700, letterSpacing: '0.5px', textTransform: 'uppercase', marginBottom: 2 }}>12M trend</div>
-                      {trendItems.map(item => (
-                        <Sparkline
-                          key={item.key}
-                          label={item.label}
-                          color={item.color}
-                          currentValue={item.currentValue}
-                          values={item.values}
-                        />
-                      ))}
-                    </div>
-
-                    <div style={{ marginLeft: 4 }}>
-                      <button onClick={() => onEditTask(t)} style={{ background: project.color, color: '#fff', border: 'none', padding: '6px 10px', borderRadius: 4, cursor: 'pointer' }}>Edit</button>
+              {topLevel.map(t => (
+                <div key={t.id} style={{ display: 'grid', gridTemplateColumns: '180px 1fr 60px', gap: 10, alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #F3F2F1' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, color: '#323130', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                    <div style={{ fontSize: 10, color: '#605E5C', marginTop: 4 }}>
+                      {t.overallScore !== null && t.overallScore !== undefined ? `Overall ${t.overallScore.toFixed(1)}` : 'No score'}
                     </div>
                   </div>
-                );
-              })}
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {metricConfigs.map(metric => (
+                      <MetricHeatmap
+                        key={`${t.id}-${metric.key}`}
+                        label={metric.label}
+                        color={metric.color}
+                        values={buildMonthlyTrend(t, tasks, metric.field)}
+                      />
+                    ))}
+                  </div>
+
+                  <div style={{ textAlign: 'right' }}>
+                    <button onClick={() => onEditTask(t)} style={{ background: project.color, color: '#fff', border: 'none', padding: '6px 8px', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}>Edit</button>
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         );
