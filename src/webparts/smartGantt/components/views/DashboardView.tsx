@@ -298,7 +298,7 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
         if (topLevel.length === 0) return null;
         return (
           <div style={{ background: '#fff', borderRadius: 8, border: '1px solid #EDEBE9', padding: '16px 20px', marginBottom: 16 }}>
-            <SectionHeader title="Top-level task averages" />
+            <SectionHeader title="Average effort" />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {topLevel.map(t => (
                 <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #F3F2F1' }}>
