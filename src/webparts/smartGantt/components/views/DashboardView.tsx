@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { addDays, differenceInCalendarDays, startOfMonth, subMonths } from 'date-fns';
+import { addDays, addMonths, differenceInCalendarDays, startOfMonth, subMonths } from 'date-fns';
 import {
   IProject, ITask, TaskStatus,
   STATUS_COLORS, STATUS_LIGHT_COLORS, PRIORITY_COLORS, phaseColor,
@@ -114,9 +114,16 @@ const getNumericMetric = (task: ITask, field: 'busEffort' | 'busImpact' | 'hrEff
   return Number.isFinite(value) ? value : null;
 };
 
-const getMonthSequence = (): Date[] => {
+const getMonthSequence = (mode: 'future' | 'past'): Date[] => {
   const anchor = startOfMonth(new Date());
   const months: Date[] = [];
+  if (mode === 'future') {
+    for (let i = 0; i < 12; i++) {
+      months.push(addMonths(anchor, i));
+    }
+    return months;
+  }
+
   for (let i = 11; i >= 0; i--) {
     months.push(subMonths(anchor, i));
   }
@@ -127,8 +134,8 @@ const buildMonthlyTrend = (
   parentTask: ITask,
   allTasks: ITask[],
   field: 'busEffort' | 'busImpact' | 'hrEffort',
+  months: Date[],
 ): { month: string; value: number | null; date: Date }[] => {
-  const months = getMonthSequence();
   const children = allTasks.filter(task => task.parentTaskId === parentTask.id);
 
   return months.map(month => {
@@ -198,6 +205,8 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
   const today = todayLocalMidnight();
   const in14 = addDays(today, 14);
   const weekAgo = addDays(today, -7);
+  const [effortWindow, setEffortWindow] = React.useState<'future' | 'past'>('future');
+  const effortMonths = getMonthSequence(effortWindow);
 
   // ── Aggregate stats ──────────────────────────────────────────────────────
   const total = tasks.length;
@@ -387,16 +396,37 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
           { key: 'avgHrEffort', label: 'HR Effort', color: '#CA5010', field: 'hrEffort' as const },
         ];
 
-        const monthHeaders = getMonthSequence();
-
         return (
           <div style={{ background: '#fff', borderRadius: 8, border: '1px solid #EDEBE9', padding: '16px 20px', marginBottom: 16 }}>
-            <SectionHeader title="Average effort" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+              <SectionHeader title="Average effort" />
+              <div style={{ display: 'flex', gap: 6, background: '#F3F2F1', borderRadius: 6, padding: 4 }}>
+                <button
+                  onClick={() => setEffortWindow('future')}
+                  style={{
+                    border: 'none', borderRadius: 4, padding: '4px 8px', fontSize: 10,
+                    fontWeight: 700, cursor: 'pointer', background: effortWindow === 'future' ? project.color : 'transparent', color: effortWindow === 'future' ? '#fff' : '#605E5C',
+                  }}
+                >
+                  Next 12m
+                </button>
+                <button
+                  onClick={() => setEffortWindow('past')}
+                  style={{
+                    border: 'none', borderRadius: 4, padding: '4px 8px', fontSize: 10,
+                    fontWeight: 700, cursor: 'pointer', background: effortWindow === 'past' ? project.color : 'transparent', color: effortWindow === 'past' ? '#fff' : '#605E5C',
+                  }}
+                >
+                  Past 12m
+                </button>
+              </div>
+            </div>
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ display: 'grid', gridTemplateColumns: '180px 1fr', gap: 10, alignItems: 'center', paddingBottom: 8, borderBottom: '1px solid #F3F2F1' }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: '#605E5C', letterSpacing: '0.5px', textTransform: 'uppercase' }}>Top-level task</div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(12, minmax(18px, 1fr))', gap: 2 }}>
-                  {monthHeaders.map(month => (
+                  {effortMonths.map(month => (
                     <div key={month.toISOString()} style={{ fontSize: 9, color: '#605E5C', textAlign: 'center', fontWeight: 700 }}>
                       {month.toLocaleString('en-US', { month: 'short' })}
                     </div>
@@ -419,7 +449,7 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
                         key={`${t.id}-${metric.key}`}
                         label={metric.label}
                         color={metric.color}
-                        values={buildMonthlyTrend(t, tasks, metric.field)}
+                        values={buildMonthlyTrend(t, tasks, metric.field, effortMonths)}
                       />
                     ))}
                   </div>
