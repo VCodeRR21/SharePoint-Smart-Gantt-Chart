@@ -107,6 +107,77 @@ const TaskRow: React.FC<{ task: ITask; onClick: () => void; showDue?: boolean; i
   );
 };
 
+const getNumericMetric = (task: ITask, field: 'busEffort' | 'busImpact' | 'hrEffort'): number | null => {
+  const raw = task[field];
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+};
+
+const buildMonthlyTrend = (
+  parentTask: ITask,
+  allTasks: ITask[],
+  field: 'busEffort' | 'busImpact' | 'hrEffort',
+): number[] => {
+  const end = new Date();
+  end.setDate(1);
+  end.setHours(0, 0, 0, 0);
+
+  const months: Date[] = [];
+  for (let i = 11; i >= 0; i--) {
+    months.push(new Date(end.getFullYear(), end.getMonth() - i, 1));
+  }
+
+  const children = allTasks.filter(task => task.parentTaskId === parentTask.id);
+  return months.map(month => {
+    const values = children
+      .map(child => {
+        const d = parseDateOnly(child.startDate) || parseDateOnly(child.dueDate);
+        if (!d) return null;
+        if (d.getFullYear() !== month.getFullYear() || d.getMonth() !== month.getMonth()) return null;
+        return getNumericMetric(child, field);
+      })
+      .filter((value): value is number => value !== null && Number.isFinite(value));
+
+    if (values.length === 0) return 0;
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  });
+};
+
+const Sparkline: React.FC<{ values: number[]; color: string; currentValue: number | null; label: string; }> = ({ values, color, currentValue, label }) => {
+  const width = 170;
+  const height = 36;
+  const padding = 4;
+  const safeMax = Math.max(...values, 1);
+  const safeMin = Math.min(...values, 0);
+  const range = safeMax - safeMin || 1;
+
+  const points = values.map((value, index) => {
+    const x = padding + (index / (values.length - 1)) * (width - padding * 2);
+    const y = height - padding - ((value - safeMin) / range) * (height - padding * 2);
+    return `${x},${y}`;
+  }).join(' ');
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <div style={{ width: 72, fontSize: 10, color: '#605E5C', fontWeight: 600 }}>{label}</div>
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style={{ flex: 1 }}>
+        <polyline
+          points={points}
+          fill="none"
+          stroke={color}
+          strokeWidth={2.5}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      </svg>
+      <div style={{ width: 36, textAlign: 'right', fontSize: 10, color: '#323130', fontWeight: 700 }}>
+        {currentValue !== null && currentValue !== undefined ? currentValue.toFixed(1) : 'N/A'}
+      </div>
+    </div>
+  );
+};
+
 // ── Main component ─────────────────────────────────────────────────────────
 export const DashboardView: React.FC<IDashboardViewProps> = ({
   project, tasks, onEditTask, onAddTask,
@@ -296,28 +367,57 @@ export const DashboardView: React.FC<IDashboardViewProps> = ({
       {(() => {
         const topLevel = tasks.filter(t => !t.parentTaskId);
         if (topLevel.length === 0) return null;
+
+        const metricConfigs = [
+          { key: 'avgBusEffort', label: 'Bus Effort', color: '#0078D4', field: 'busEffort' as const },
+          { key: 'avgBusImpact', label: 'Bus Impact', color: '#107C10', field: 'busImpact' as const },
+          { key: 'avgHrEffort', label: 'HR Effort', color: '#CA5010', field: 'hrEffort' as const },
+        ];
+
         return (
           <div style={{ background: '#fff', borderRadius: 8, border: '1px solid #EDEBE9', padding: '16px 20px', marginBottom: 16 }}>
             <SectionHeader title="Average effort" />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {topLevel.map(t => (
-                <div key={t.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #F3F2F1' }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, color: '#323130', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
-                    <div style={{ fontSize: 11, color: '#605E5C', marginTop: 4 }}>
-                      <span>Avg Bus Effort: <strong>{t.avgBusEffort !== null && t.avgBusEffort !== undefined ? t.avgBusEffort : 'N/A'}</strong></span>
-                      <span style={{ marginLeft: 12 }}>Avg Bus Impact: <strong>{t.avgBusImpact !== null && t.avgBusImpact !== undefined ? t.avgBusImpact : 'N/A'}</strong></span>
-                      <span style={{ marginLeft: 12 }}>Avg HR Effort: <strong>{t.avgHrEffort !== null && t.avgHrEffort !== undefined ? t.avgHrEffort : 'N/A'}</strong></span>
-                      {t.overallScore !== null && t.overallScore !== undefined && (
-                        <span style={{ marginLeft: 12 }}>Overall: <strong>{t.overallScore}</strong></span>
-                      )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {topLevel.map(t => {
+                const trendItems = metricConfigs.map(metric => ({
+                  ...metric,
+                  currentValue: t[metric.key] !== null && t[metric.key] !== undefined ? Number(t[metric.key]) : null,
+                  values: buildMonthlyTrend(t, tasks, metric.field),
+                }));
+
+                return (
+                  <div key={t.id} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, padding: '10px 0', borderBottom: '1px solid #F3F2F1' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, color: '#323130', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t.title}</div>
+                      <div style={{ fontSize: 11, color: '#605E5C', marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: '6px 12px' }}>
+                        <span>Avg Bus Effort: <strong>{t.avgBusEffort !== null && t.avgBusEffort !== undefined ? t.avgBusEffort.toFixed(1) : 'N/A'}</strong></span>
+                        <span>Avg Bus Impact: <strong>{t.avgBusImpact !== null && t.avgBusImpact !== undefined ? t.avgBusImpact.toFixed(1) : 'N/A'}</strong></span>
+                        <span>Avg HR Effort: <strong>{t.avgHrEffort !== null && t.avgHrEffort !== undefined ? t.avgHrEffort.toFixed(1) : 'N/A'}</strong></span>
+                        {t.overallScore !== null && t.overallScore !== undefined && (
+                          <span>Overall: <strong>{t.overallScore.toFixed(1)}</strong></span>
+                        )}
+                      </div>
+                    </div>
+
+                    <div style={{ width: 280, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div style={{ fontSize: 10, color: '#605E5C', fontWeight: 700, letterSpacing: '0.5px', textTransform: 'uppercase', marginBottom: 2 }}>12M trend</div>
+                      {trendItems.map(item => (
+                        <Sparkline
+                          key={item.key}
+                          label={item.label}
+                          color={item.color}
+                          currentValue={item.currentValue}
+                          values={item.values}
+                        />
+                      ))}
+                    </div>
+
+                    <div style={{ marginLeft: 4 }}>
+                      <button onClick={() => onEditTask(t)} style={{ background: project.color, color: '#fff', border: 'none', padding: '6px 10px', borderRadius: 4, cursor: 'pointer' }}>Edit</button>
                     </div>
                   </div>
-                  <div style={{ marginLeft: 12 }}>
-                    <button onClick={() => onEditTask(t)} style={{ background: project.color, color: '#fff', border: 'none', padding: '6px 10px', borderRadius: 4, cursor: 'pointer' }}>Edit</button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         );
